@@ -41,9 +41,7 @@ Function Write-Log {
         [string]$Level = 'INFO',
 
         [Parameter(Mandatory = $false)]
-        [System.Management.Automation.ErrorRecord]$ErrorRecord,
-
-        [switch]$VerboseLog
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $logEntry = "$timestamp [$Level] : $Message"
@@ -58,8 +56,8 @@ Function Write-Log {
     switch ($Level) {
         'ERROR'   { Write-Error $logEntry }
         'WARN'    { Write-Warning $logEntry }
-        'DEBUG'   { if ($VerboseLog) { Write-Host $logEntry -ForegroundColor Cyan } }
-        'VERBOSE' { if ($VerboseLog) { Write-Verbose $logEntry } }
+        'DEBUG'   { Write-Debug $logEntry }
+        'VERBOSE' { Write-Verbose $logEntry }
         Default   { Write-Host $logEntry }
     }
 }
@@ -96,11 +94,28 @@ Function ScriptError {
         UPN   = $UserUPNForError
         Error = $msg
     }
+    
+    # Define $response for New-SnowTask description
     $response = $respObj | ConvertTo-Json
 
-    Write-Log $msg -Level 'ERROR'
-    Write-Log $response -Level 'ERROR'
-    Write-Log 'One or more errors occurred, Refer the output screen for details' -Level 'ERROR'
+    # Revised logging as per instructions
+    $detailObject = @{
+        UserUPN = $UserUPNForError
+        LicenseType = $LicenseTypeForError
+        Action = $actionForError
+        RITMNumber = $RITMNumberForError
+        # Add other important context here - LAppCase and RequestedBy are already in the previous version, keeping them.
+        LAppCase = $LAppCaseForError 
+        RequestedBy = $RequestedByForError
+    }
+    # Ensure only non-empty values are joined for contextString
+    $contextString = $detailObject.GetEnumerator() | ForEach-Object { if($_.Value) { "$($_.Name): $($_.Value)" } } | Where-Object { $_ } | Join-String -Separator ', '
+    
+    Write-Log "Error: $msg. Context: $contextString" -Level 'ERROR' # Main log message with key context
+
+    # For more detailed diagnostics, log the full JSON response at a DEBUG level
+    $fullResponseJson = @{ UPN = $UserUPNForError; ErrorMessage = $msg; AllParams = $PSBoundParameters } | ConvertTo-Json -Depth 3
+    Write-Log "Full error object for ScriptError: $fullResponseJson" -Level 'DEBUG'
 
     if($LicenseTypeForError -eq 'MicrosoftCopilot'){
         try{
@@ -171,6 +186,7 @@ Function New-SnowTask {
         [Parameter(Mandatory = $false)]
         [string]$cmdb_ci = 'Digital Collaboration Tools' # Default from E1-E5, Copilot used 'M365 Copilot'
     )
+    Write-Log "New-SnowTask: Attempting to create SNOW task. Short Description: '$shortDescription', User: $UserUPN, CMDB_CI: '$cmdb_ci', TicketType: '$TicketType'" -Level 'VERBOSE'
 
     $header = @{
         'Content-Type'  = 'application/json'
@@ -206,9 +222,11 @@ Function New-SnowTask {
         body   = $body | ConvertTo-Json
         header = $header
     }
-
+    Write-Log "New-SnowTask: Params for Invoke-RestMethod (body only): $($params.body | ConvertTo-Json -Depth 2 -Compress)" -Level 'DEBUG'
     try {
-        (Invoke-RestMethod @params -ErrorAction Stop).result.number
+        $taskResult = (Invoke-RestMethod @params -ErrorAction Stop).result.number
+        Write-Log "New-SnowTask: Successfully created SNOW task '$taskResult' for User: $UserUPN. Short Description: '$shortDescription'" -Level 'INFO'
+        return $taskResult
     }
     catch {
         $exMsg = $_.Exception.Message
@@ -228,7 +246,13 @@ Function New-SnowTask {
         }
         catch {
             $exMsgRetry = $_.Exception.Message
-            Write-Log "Failed to log SNOW ticket on retry for $UserUPN. Body: $($body | ConvertTo-Json). Params: $($params | ConvertTo-Json). Error: $exMsgRetry" -Level 'ERROR'
+            # Sanitize params for logging
+            $paramsForLogging = $params.PSObject.Copy()
+            if ($paramsForLogging.header.Authorization) {
+                $paramsForLogging.header.Authorization = "Bearer <REDACTED>"
+            }
+            $safeParamsJson = $paramsForLogging | ConvertTo-Json -Depth 3
+            Write-Log "Failed to log SNOW ticket on retry for $UserUPN. Body: $($body | ConvertTo-Json). Sanitized Params: $safeParamsJson. Error: $exMsgRetry" -Level 'ERROR'
             throw "Failed to create SNOW task after retry: $exMsgRetry" # Throw to allow ScriptError to handle
         }
     }
@@ -259,6 +283,7 @@ function Convert-ToDateTime {
 }
 
 function Get-MSFormToken {
+    Write-Log "Attempting to retrieve MS Form token." -Level 'DEBUG'
     # $KeyvaultName is global or passed as param. Assuming global for now.
     $scope = 'https://forms.cloud.microsoft/.default'
     $refreshtoken = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'api-dwp-graph-refreshToken' -AsPlainText # Make sure $KeyvaultName is correctly set (e.g. 'zne-dwp-p-kvl')
@@ -273,6 +298,7 @@ function Get-MSFormToken {
     }
     $response = Invoke-WebRequest "https://login.microsoftonline.com/$tenantid/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Method POST -Body $body
     $tokenobj = ConvertFrom-Json $response.Content
+    Write-Log "Successfully retrieved MS Form token." -Level 'DEBUG'
     return $tokenobj.access_token
 }
 
@@ -281,6 +307,7 @@ function Get-MSFormResponse {
         [Parameter(Mandatory = $true)]
         [string]$UserUPN
     )
+    Write-Log "Get-MSFormResponse: Attempting to get MS Form response for User: $UserUPN, FormID: $formId" -Level 'VERBOSE'
     $TenantId = 'ea80952e-a476-42d4-aaf4-5457852b0f7e'
     $formId = 'LpWA6nak1EKq9FRXhSsPfk-JoVaKVU9JmxKWm6PhSkVUQTQ1NzYyTUZOTlUxWFNFVlZOUlNFRkdWUC4u'
     $UserID = '56a1894f-558a-494f-9b12-969ba3e14a45' # This seems to be a static UserID, investigate if it should be dynamic
@@ -291,7 +318,7 @@ function Get-MSFormResponse {
     catch {
         $ex = $_.Exception.Message
         Write-Log $ex -Level 'Verbose'
-        ScriptError('Failed to get MS Form token.') # This will call the new ScriptError
+        ScriptError -msg 'Failed to get MS Form token.' -UserUPNForError $UserUPN
         return # Stop further execution in this function
     }
 
@@ -299,14 +326,18 @@ function Get-MSFormResponse {
         'Authorization' = "Bearer $MSFormToken"
     }
     $formResponsesUrl = "https://forms.office.com/formapi/api/$TenantId/users/$UserID/forms('$formId')/responses"
+    Write-Log "Get-MSFormResponse: Calling Invoke-RestMethod for URL: $formResponsesUrl" -Level 'DEBUG'
     $response = Invoke-RestMethod -Uri $formResponsesUrl -Headers $headers -Method Get
+    Write-Log "Get-MSFormResponse: Successfully retrieved MS Form responses for User: $UserUPN. Found $($response.value.count) total responses for the form." -Level 'DEBUG'
 
     $ResponseObject = $response.value | Where-Object { $_.responder -eq $userUPN }
 
     if ($null -eq $ResponseObject) {
+        Write-Log "Get-MSFormResponse: No MS Form response found for User: $UserUPN. Returning 'Pending'." -Level 'DEBUG'
         return "Pending"
     }
     else {
+        Write-Log "Get-MSFormResponse: Found MS Form response for User: $UserUPN." -Level 'DEBUG'
         # $Responder = $responseObject.responder # Not used
         # $ResponseDate = $responseObject.submitDate # Not used
         $Answer = ($responseObject.answers | ConvertFrom-Json).answer1
@@ -323,7 +354,7 @@ function Get-SOUCornerstoneReport{
     catch {
         $ex = $_.Exception.Message
         Write-Log $ex -Level 'ERROR'
-        ScriptError('Failed to get storage account details.')
+        ScriptError -msg 'Failed to get storage account details.'
         return
     }
 
@@ -347,7 +378,7 @@ function Get-SOUCornerstoneReport{
     catch {
         $ex = $_.Exception.Message
         Write-Log $ex -Level 'ERROR'
-        ScriptError('Failed to get CSV file from container matching with name Copilot_SOUReport_CSOD.')
+        ScriptError -msg 'Failed to get CSV file from container matching with name Copilot_SOUReport_CSOD.'
         return
     }
 
@@ -363,7 +394,7 @@ function Get-SOUCornerstoneReport{
         catch {
             $ex = $_.Exception.Message
             Write-Log $ex -Level 'ERROR'
-            ScriptError('Failed to download latest CSV file from storage container.')
+            ScriptError -msg 'Failed to download latest CSV file from storage container.'
             return
         }
         try {
@@ -372,7 +403,7 @@ function Get-SOUCornerstoneReport{
         catch {
             $ex = $_.Exception.Message
             Write-Log $ex -Level 'ERROR'
-            ScriptError('Failed to download passphrase file from storage container.')
+            ScriptError -msg 'Failed to download passphrase file from storage container.'
             return
         }
         $encryptedFilePath = Join-Path $destinationFilePath $blobName
@@ -384,7 +415,7 @@ function Get-SOUCornerstoneReport{
         catch {
             $ex = $_.Exception.Message
             Write-Log $ex -Level 'ERROR'
-            ScriptError('Failed to download private key file from storage container.')
+            ScriptError -msg 'Failed to download private key file from storage container.'
             return
         }
         try {
@@ -393,31 +424,57 @@ function Get-SOUCornerstoneReport{
         catch {
             $ex = $_.Exception.Message
             Write-Log $ex -Level 'ERROR'
-            ScriptError('Failed to run GPG command to import the secret keys on hybrid worker.')
+            ScriptError -msg 'Failed to run GPG command to import the secret keys on hybrid worker.'
             return
         }
-        Invoke-Command -ScriptBlock {
-            # Variables from parent scope need to be passed or redefined if Invoke-Command creates new session context
-            $gpgExecutablePath_ic = 'C:\Program Files (x86)\GnuPGin\gpg.exe' # Redefine or pass using $using:
-            try {
-                & $gpgExecutablePath_ic --batch --yes --pinentry-mode loopback --passphrase-file "$using:passphraseFilePath" --output "$using:decryptedFilePath" --decrypt "$using:encryptedFilePath" | Out-Null
-            }
-            catch {
-                $ex_ic = $_.Exception.Message
-                Write-Log $ex_ic -Level 'ERROR' # This Write-Log might not work as expected if function not defined in this scope
-                # Propagate error out or use a more robust error handling for Invoke-Command
-                throw "GPG decryption failed: $ex_ic" 
-            }
+
+        $invokeCommandSucceeded = $false
+        $gpgOutputLog = $null # To store GPG output for logging on success
+
+        try {
+            $remoteOutput = Invoke-Command -ScriptBlock {
+                param($gpgPathInternal, $passphraseFileInternal, $outputFileInternal, $inputFileInternal)
+                
+                $capturedGpgOutput = '' # Initialize to capture GPG command output
+                
+                try {
+                    # Execute GPG command, redirect stderr to stdout (2>&1), and capture all output
+                    & $gpgPathInternal --batch --yes --pinentry-mode loopback --passphrase-file "$passphraseFileInternal" --output "$outputFileInternal" --decrypt "$inputFileInternal" 2>&1 | ForEach-Object { $capturedGpgOutput += "$_`n" }
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "GPG decryption command failed with exit code $LASTEXITCODE. Output: $capturedGpgOutput"
+                    }
+                    # Return a success message including any standard output from GPG
+                    "GPG decryption successful. Output: $capturedGpgOutput"
+                }
+                catch {
+                    # This catch is for PowerShell errors in the scriptblock, or the re-thrown GPG error
+                    throw "Error within GPG ScriptBlock: $($_.Exception.Message)"
+                }
+            } -ArgumentList $gpgExecutablePath, $using:passphraseFilePath, $using:decryptedFilePath, $using:encryptedFilePath
+            
+            $gpgOutputLog = $remoteOutput # Store successful output for logging
+            Write-Log "GPG Decryption via Invoke-Command successful. Details: $gpgOutputLog" -Level 'INFO'
+            $invokeCommandSucceeded = $true
+
         }
-        if ($LASTEXITCODE -ne 0) {
-             ScriptError "GPG Decryption failed. Exit code: $LASTEXITCODE. Check logs for details."
-             return
+        catch {
+            $gpgErrorMessage = $_.Exception.Message
+            Write-Log "Error during GPG decryption via Invoke-Command: $gpgErrorMessage" -Level 'ERROR'
+            ScriptError -msg "GPG Decryption process failed: $gpgErrorMessage"
+            return $null # Ensure function returns on failure
         }
+
+        if (-not $invokeCommandSucceeded) {
+            # This case should ideally be covered by the ScriptError call in the catch block.
+            return $null
+        }
+        
         return $decryptedFilePath
     }
     else {
         Write-Log "No blobs found matching the pattern 'Copilot_SOUReport_CSOD*' in storage container '$containerNameSouReport'." -Level VERBOSE
-        ScriptError("No blobs found matching the pattern Copilot_SOUReport_CSOD* in storage container '$containerNameSouReport'.")
+        ScriptError -msg "No blobs found matching the pattern Copilot_SOUReport_CSOD* in storage container '$containerNameSouReport'."
         return
     }
 }
@@ -449,7 +506,7 @@ function Get-SOUStatus {
     catch {
         $ex = $_.Exception.Message
         Write-Log $ex -Level 'ERROR'
-        ScriptError("Failed to get MS Form response for the user $UserUPN.")
+        ScriptError -msg "Failed to get MS Form response for the user $UserUPN." -UserUPNForError $UserUPN
         return "Error" # Indicate error state
     }
 
@@ -459,7 +516,7 @@ function Get-SOUStatus {
     catch {
         $ex = $_.Exception.Message
         Write-Log $ex -Level 'ERROR'
-        ScriptError("Failed to get SOU CSV report content from path: $CornerstoneFilePath.")
+        ScriptError -msg "Failed to get SOU CSV report content from path: $CornerstoneFilePath." -UserUPNForError $UserUPN
         return "Error" # Indicate error state
     }
     
@@ -491,9 +548,15 @@ function Get-SOUStatus {
         if ($LAppCaseAssignedDateFromDB -lt $TwentyEightDaysAgo) {
             Write-Log "Training assignment date ($LAppCaseAssignedDateFromDB) for user $UserUPN is older than 28 days. Training has expired." -Level WARN
 
-            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Training expired' WHERE ID = $DBMessageID;"
-            Write-Log "DB record $DBMessageID for UPN $userUPN - $LicenseType $Action marked as Training Expired."
-
+            try {
+                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Training expired' WHERE ID = $DBMessageID;"
+                Write-Log "DB record $DBMessageID for UPN $userUPN - $LicenseType $Action marked as Training Expired."
+            }
+            catch {
+                $sqlExMsg = $_.Exception.Message
+                ScriptError -msg "SQL update failed for 'Training Expired' status for DB ID $DBMessageID. SQL Error: $sqlExMsg" -UserUPNForError $UserUPN -RITMNumberForError $CurrentRITMNumber # LicenseType & action will use global defaults
+                # This error is critical for this user's SOU status processing.
+            }
             Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the task.'
             Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the ticket.'
             Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Training Expired'
@@ -516,7 +579,13 @@ function Get-SOUStatus {
                         Write-Log "User $UserUPN (T&S) has completed SOU but PTW training is not completed. Rejecting." -Level WARN
                         Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot license request rejected' -StorageAccountName $StorageAccountName -ContainerName $ContainerName -TemplateName 'Microsft_365_copilot_ST&S_PTW_Pending.html' -Replacements @{}
                         
-                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Rejected due to PTW non-completion' WHERE ID = $DBMessageID;"
+                        try {
+                            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Rejected due to PTW non-completion' WHERE ID = $DBMessageID;"
+                        }
+                        catch {
+                            $sqlExMsg = $_.Exception.Message
+                            ScriptError -msg "SQL update failed for 'PTW non-completion' status for DB ID $DBMessageID. SQL Error: $sqlExMsg" -UserUPNForError $UserUPN -RITMNumberForError $CurrentRITMNumber
+                        }
                         Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected."
                         Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected' or similar
                         Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected' # Use 'Rejected' stage
@@ -537,7 +606,13 @@ function Get-SOUStatus {
                         Write-Log "User $UserUPN (T&S) has completed SOU but no PTW training data found. Assuming PTW incomplete and rejecting." -Level WARN
                         # Similar rejection logic as above for PTW not completed
                         Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot license request rejected' -StorageAccountName $StorageAccountName -ContainerName $ContainerName -TemplateName 'Microsft_365_copilot_ST&S_PTW_Pending.html' -Replacements @{}
-                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Rejected due to missing PTW data' WHERE ID = $DBMessageID;"
+                        try {
+                            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Rejected due to missing PTW data' WHERE ID = $DBMessageID;"
+                        }
+                        catch {
+                            $sqlExMsg = $_.Exception.Message
+                            ScriptError -msg "SQL update failed for 'missing PTW data' status for DB ID $DBMessageID. SQL Error: $sqlExMsg" -UserUPNForError $UserUPN -RITMNumberForError $CurrentRITMNumber
+                        }
                         Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected."
                         Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected'
                         Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected'
@@ -603,7 +678,7 @@ function Get-TOUStatus { # This function is specific to Copilot.ps1 logic for no
     catch {
         $ex = $_.Exception.Message
         Write-Log $ex -Level 'ERROR'
-        ScriptError("Failed to get MS Form response for TOU status for user $UserUPN.")
+        ScriptError -msg "Failed to get MS Form response for TOU status for user $UserUPN." -UserUPNForError $UserUPN
         return "Error"
     }
     switch ($FormResponseValue) {
@@ -670,9 +745,24 @@ function Invoke-UpgradeToCopilot {
         Update-TaskStatus -TicketNumber $TaskNumberToUpdate -State '3' -WorkNotes 'User has failed the SOU/TOU training or declined. Closing the task.'
         Update-TicketStatus -TicketNumber $RITMNumberToUpdate -State '3' -Stage 'Completed' -WorkNotes 'User has failed the SOU/TOU training or declined. Closing the RITM.' # Stage should be more like 'Rejected' or 'Closed Incomplete'
 
-        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'SOU/TOU Failed' WHERE ID = $DBRecordIDForFailureUpdate;"
-        Write-Log "DB record $DBRecordIDForFailureUpdate for $userUPN marked as SOU/TOU Failed."
-
+        try {
+            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'SOU/TOU Failed' WHERE ID = $DBRecordIDForFailureUpdate;"
+            Write-Log "DB record $DBRecordIDForFailureUpdate for $userUPN marked as SOU/TOU Failed."
+        }
+        catch {
+            $sqlExMsg = $_.Exception.Message
+            # Parameters for ScriptError: UserUPN, RITMNumberToUpdate, actionForDV, RequestedByForDV, licenseCategorizationIDForDV, RequestedTimeForDV, ProcessedTimeForDV, LAppCaseFromContext
+            ScriptError -msg "SQL update failed for 'SOU/TOU Failed' status for DB ID $DBRecordIDForFailureUpdate. SQL Error: $sqlExMsg" `
+                        -UserUPNForError $UserUPN `
+                        -LicenseTypeForError $LicenseType `
+                        -RITMNumberForError $RITMNumberToUpdate `
+                        -actionForError $actionForDV `
+                        -RequestedByForError $RequestedByForDV `
+                        -licenseCategorizationIDForError $licenseCategorizationIDForDV `
+                        -RequestedTimeForError $RequestedTimeForDV `
+                        -ProcessedTimeForError $ProcessedTimeForDV `
+                        -LAppCaseForError $LAppCaseFromContext
+        }
         Update-EntityQuota -UserEntity $UserExtensionAttribute1ForQuota -TicketStage 'Rejected' # Or 'Training Failed'
 
         $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
@@ -740,6 +830,7 @@ function Get-EntityQuota {
         [Parameter(Mandatory = $true)]
         [string]$UserEntity
     )
+    Write-Log "Get-EntityQuota: Attempting to get entity quota from SNOW for Entity: '$UserEntity', Sku: '$SkuPartNumber'." -Level 'VERBOSE'
     $header = @{
         'Content-Type' = 'application/json'
         Authorization  = "Bearer $SNOW_Oauth_Token"
@@ -780,11 +871,11 @@ function Update-EntityQuota {
         [Parameter(Mandatory = $true)]
         [string]$TicketStage # e.g., 'Pending Training', 'Training Expired', 'Rejected'
     )
-
-    $CurrentEntityAvailableLicenses = Get-EntityQuota -UserEntity $UserEntity
+    
+    $CurrentEntityAvailableLicenses = Get-EntityQuota -UserEntity $UserEntity # Get-EntityQuota has its own entry log
     if ($null -eq $CurrentEntityAvailableLicenses) {
          Write-Log "Could not retrieve current quota for $UserEntity. Aborting Update-EntityQuota." -Level ERROR
-         ScriptError "Failed to retrieve current quota for $UserEntity during Update-EntityQuota."
+         ScriptError -msg "Failed to retrieve current quota for $UserEntity during Update-EntityQuota." # UserEntity is not UPN
          return 'failed'
     }
 
@@ -805,7 +896,7 @@ function Update-EntityQuota {
     $sysID = $SysIDs[$UserEntity]
     if (-not $sysID) {
         Write-Log "SysID not found for entity '$UserEntity' in Update-EntityQuota." -Level ERROR
-        ScriptError "SysID not found for entity '$UserEntity' in Update-EntityQuota."
+        ScriptError -msg "SysID not found for entity '$UserEntity' in Update-EntityQuota." # UserEntity is not UPN
         return 'failed'
     }
 
@@ -825,6 +916,7 @@ function Update-EntityQuota {
     # No change for other stages explicitly mentioned in Copilot.ps1
 
     $body = @{ available_licenses = $NewEntityAvailableLicenses } | ConvertTo-Json
+    Write-Log "Update-EntityQuota: Attempting to update entity quota in SNOW for Entity: '$UserEntity', SysID: '$sysID', NewAvailableLicenses: '$NewEntityAvailableLicenses', TicketStage: '$TicketStage'." -Level 'VERBOSE'
     $params = @{
         method = 'PUT'
         uri    = "$SnowURL/api/snc/v2/bp_rest_api/c12586b6db9818d0389f3951f396197c/UpdateProductLicense/$sysid"
@@ -861,6 +953,7 @@ function Send-CopilotEmail { # Specific to Copilot.ps1
         [Parameter(Mandatory = $false)]
         [array]$Replacements
     )
+    Write-Log "Send-CopilotEmail: Attempting to send Copilot email. To: '$SendTo', Subject: '$EmailSubject', Template: '$TemplateName'." -Level 'VERBOSE'
     $bodyEmailAuth = @{ # Renamed variable
         client_id     = $Email_AppID
         client_secret = $Email_Secret
@@ -937,6 +1030,7 @@ function Update-TicketStatus { # Shared, seemingly identical
         [Parameter(Mandatory = $false)]
         [string]$State
     )
+    Write-Log "Update-TicketStatus: Attempting to update SNOW RITM: $TicketNumber. State: '$State', Stage: '$Stage', WorkNotes present: $($PSBoundParameters.ContainsKey('WorkNotes') -and ($null -ne $WorkNotes))" -Level 'VERBOSE'
     $header = @{
         'Content-Type' = 'application/json'
         Authorization  = "Bearer $SNOW_Oauth_Token"
@@ -953,9 +1047,10 @@ function Update-TicketStatus { # Shared, seemingly identical
         header = $header
         body   = $jsonBody
     }
+    Write-Log "Update-TicketStatus: Body for Invoke-RestMethod: $jsonBody" -Level 'DEBUG'
     try {
         Invoke-RestMethod @params
-        Write-Log "RITM $TicketNumber status updated: State=$State, Stage=$Stage." -Level INFO
+        Write-Log "RITM $TicketNumber status updated: State=$State, Stage=$Stage." -Level INFO # Existing good log
     }
     catch {
         $ex = $_.Exception.Message
@@ -972,6 +1067,7 @@ function Update-TaskStatus { # Shared, seemingly identical
         [Parameter(Mandatory = $false)]
         [string]$State
     )
+    Write-Log "Update-TaskStatus: Attempting to update SNOW Task: $TicketNumber. State: '$State', WorkNotes present: $($PSBoundParameters.ContainsKey('WorkNotes') -and ($null -ne $WorkNotes))" -Level 'VERBOSE'
     $header = @{
         'Content-Type' = 'application/json'
         Authorization  = "Bearer $SNOW_Oauth_Token"
@@ -987,9 +1083,10 @@ function Update-TaskStatus { # Shared, seemingly identical
         header = $header
         body   = $jsonBody
     }
+    Write-Log "Update-TaskStatus: Body for Invoke-RestMethod: $jsonBody" -Level 'DEBUG'
     try {
         Invoke-RestMethod @params
-        Write-Log "Task $TicketNumber status updated: State=$State." -Level INFO
+        Write-Log "Task $TicketNumber status updated: State=$State." -Level INFO # Existing good log
     }
     catch {
         $ex = $_.Exception.Message
@@ -998,6 +1095,7 @@ function Update-TaskStatus { # Shared, seemingly identical
 }
 
 function Get-SalesforceJWTToken { # Specific to Copilot.ps1
+    Write-Log "Attempting to retrieve Salesforce JWT token for user '$SalesforceUsername' via client ID '$SalesforceClientId'." -Level 'DEBUG'
     # $StorageAccountSubscription, $StorageAccountNameRSG, $storageAccountName are global
     # $SalesforceCertContainer, $SalesforceCertBlobName, $SalesforceCertKeyVaultName, $SalesforceCertPasswordSecretName are from config
     # $SalesforceClientId, $SalesforceUsername, $SalesforceAudienceUrl, $SalesforceTokenUrl are from config
@@ -1013,7 +1111,7 @@ function Get-SalesforceJWTToken { # Specific to Copilot.ps1
     }
     catch {
         Write-Log "Failed to download Salesforce certificate '$SalesforceCertBlobName' from '$SalesforceCertContainer': $($_.Exception.Message)" -Level 'ERROR'
-        ScriptError "Failed to download Salesforce certificate."
+        ScriptError -msg "Failed to download Salesforce certificate."
         return $null
     }
 
@@ -1023,7 +1121,7 @@ function Get-SalesforceJWTToken { # Specific to Copilot.ps1
     }
     catch {
         Write-Log "Failed to retrieve Salesforce certificate password from Key Vault '$SalesforceCertKeyVaultName': $($_.Exception.Message)" -Level 'ERROR'
-        ScriptError "Failed to retrieve Salesforce certificate password."
+        ScriptError -msg "Failed to retrieve Salesforce certificate password."
         return $null
     }
 
@@ -1033,7 +1131,7 @@ function Get-SalesforceJWTToken { # Specific to Copilot.ps1
     }
     catch {
         Write-Log "Failed to load Salesforce certificate from '$certificatePath': $($_.Exception.Message)" -Level 'ERROR'
-        ScriptError "Failed to load Salesforce certificate."
+        ScriptError -msg "Failed to load Salesforce certificate."
         return $null
     }
 
@@ -1053,7 +1151,7 @@ function Get-SalesforceJWTToken { # Specific to Copilot.ps1
     }
     catch {
         Write-Log "Failed to create or sign JWT for Salesforce: $($_.Exception.Message)" -Level 'ERROR'
-        ScriptError "JWT creation/signing failed for Salesforce."
+        ScriptError -msg "JWT creation/signing failed for Salesforce."
         return $null
     }
 
@@ -1061,11 +1159,12 @@ function Get-SalesforceJWTToken { # Specific to Copilot.ps1
     try {
         $responseString = Invoke-RestMethod -Uri $SalesforceTokenUrl -Method Post -Body $bodySFAuth -ContentType 'application/x-www-form-urlencoded'
         $token = ($responseString | ConvertFrom-Json).access_token
+        Write-Log "Successfully retrieved Salesforce JWT token." -Level 'DEBUG'
         return $token
     }
     catch {
         Write-Log "Failed to get Salesforce token from '$SalesforceTokenUrl': $($_.Exception.Response.GetResponseStream() | ForEach-Object {(New-Object System.IO.StreamReader($_)).ReadToEnd()})" -Level 'ERROR'
-        ScriptError "Salesforce token request failed."
+        ScriptError -msg "Salesforce token request failed."
         return $null
     }
 }
@@ -1077,10 +1176,11 @@ function Invoke-SalesforceCase { # Specific to Copilot.ps1
         [Parameter(Mandatory = $false)]
         [string]$UserNTID
     )
+    Write-Log "Invoke-SalesforceCase: Attempting to create Salesforce LApp case for user '$UserName' (NTID: '$UserNTID'), MTLID: '$SalesforceMTLID'." -Level 'VERBOSE'
     # $SalesforceApiUrl, $SalesforceMTLID are global from config
     $token = Get-SalesforceJWTToken
     if (-not $token) {
-        ScriptError "Cannot create Salesforce case for $UserName, failed to get JWT token."
+        ScriptError -msg "Cannot create Salesforce case for $UserName, failed to get JWT token." -UserUPNForError $UserNTID # Using NTID as a proxy for UPN here
         return $null
     }
     $headers = @{ 'Sforce-Auto-Assign' = 'false'; 'Content-Type' = 'application/json'; 'Authorization' = "Bearer $token" }
@@ -1088,14 +1188,15 @@ function Invoke-SalesforceCase { # Specific to Copilot.ps1
     $body = @{ WheredoyousitinBP = '1'; ActionRequired = 'Add Learners'; MTLID = $SalesforceMTLID; User1 = $sanitizedName; NTIDUser1 = $UserNTID } | ConvertTo-Json
 
     try {
+        Write-Log "Invoke-SalesforceCase: Body for Invoke-RestMethod: $body" -Level 'DEBUG'
         $LappTicketNumber = Invoke-RestMethod -Uri $SalesforceApiUrl -Headers $headers -Method Post -Body $body -ErrorAction Stop
-        Write-Log "Salesforce LApp case created for $UserName ($UserNTID): $LappTicketNumber" -Level INFO
+        Write-Log "Salesforce LApp case created for $UserName ($UserNTID): $LappTicketNumber" -Level INFO # Existing good log
         return $LappTicketNumber
     }
     catch {
         $errorDetails = $_.Exception.Response.GetResponseStream() | ForEach-Object {(New-Object System.IO.StreamReader($_)).ReadToEnd()}
         Write-Log "Error creating Salesforce case for $UserName ($UserNTID). Body: $body. Error: $errorDetails" -Level 'ERROR'
-        ScriptError "Error while raising LApp case: $errorDetails"
+        ScriptError -msg "Error while raising LApp case: $errorDetails" -UserUPNForError $UserNTID # Using NTID as a proxy for UPN here
         return $null
     }
 }
@@ -1126,13 +1227,13 @@ function Invoke-UpgradeToE5 {
     $bodyToken = @{ client_id = $Saviynt_Oauth_ClientID; client_secret = $Saviynt_Oauth_Secret; grant_type = 'client_credentials'; scope = "$SaviyntApiScope/.default" }
     $uriToken = "https://login.microsoftonline.com:443/$tenantId/oauth2/v2.0/token"
     try { $bearer = Invoke-RestMethod -Method POST -Uri $uriToken -Body $bodyToken }
-    catch { Write-Log "Saviynt OAuth token failed: $($_.Exception.Message)" -Level ERROR; ScriptError "Saviynt OAuth token failed."; return }
+    catch { Write-Log "Saviynt OAuth token failed: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt OAuth token failed." -UserUPNForError $UserUPNForE5; return }
 
     $bodyUserLookup = @{ customproperty16 = $UserUPNForE5; max = 100; offset = 0 }
     $headerUserLookup = @{ 'Content-Type' = 'application/x-www-form-urlencoded'; Authorization = "Bearer $($bearer.access_token)" }
     $paramsUserLookup = @{ method = 'GET'; uri = "$SaviyntApiBaseUrl/identity-api/v1/users"; headers = $headerUserLookup; body = $bodyUserLookup }
     try { $result = Invoke-RestMethod @paramsUserLookup -ErrorAction Stop }
-    catch { Write-Log "Saviynt user lookup for $UserUPNForE5 failed: $($_.Exception.Message)" -Level ERROR; ScriptError "Saviynt user lookup failed."; return }
+    catch { Write-Log "Saviynt user lookup for $UserUPNForE5 failed: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt user lookup failed." -UserUPNForError $UserUPNForE5; return }
 
     Write-Log "Saviynt user lookup attributes for $UserUPNForE5: $($result.attributes | ConvertTo-Json -Depth 3)" -Level DEBUG
     $BPIdentityAPITransactionID = (New-Guid).Guid -replace '-[a-f|0-9]{12}$'
@@ -1150,8 +1251,9 @@ function Invoke-UpgradeToE5 {
                 $bodyUpdate = @{ attributes = @{ customproperty53 = @{ value = $E5_customproperty53_true }; customproperty63 = @{ value = $E5_customproperty63 } } }
                 $paramsUpdate = @{ method = 'PUT'; uri = "$SaviyntApiBaseUrl/identity-api/v1/async/users/$saviyntUserSystemName"; headers = $headerUpdate; body = ($bodyUpdate | ConvertTo-Json) }
                 
+                Write-Log "Invoke-UpgradeToE5: Requesting Saviynt E5 uplift for $UserUPNForE5 (SystemUserName: $saviyntUserSystemName). URI: $($paramsUpdate.uri), TransactionID: DWP-$BPIdentityAPITransactionID" -Level 'VERBOSE'
                 try { $TransactionResponse = Invoke-RestMethod @paramsUpdate -ErrorAction Stop }
-                catch { Write-Log "Saviynt E5 uplift request for $UserUPNForE5 failed: $($_.Exception.Message)" -Level ERROR; ScriptError "Saviynt E5 uplift request failed."; return }
+                catch { Write-Log "Saviynt E5 uplift request for $UserUPNForE5 failed: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt E5 uplift request failed." -UserUPNForError $UserUPNForE5; return }
                 
                 $TransactionID = $TransactionResponse.TRACKING_ID
                 Write-Log "Saviynt E5 uplift request for $UserUPNForE5 logged. Tracking ID: $TransactionID" -Level INFO
@@ -1202,13 +1304,13 @@ function Invoke-DowngradeToE1 {
     $bodyToken = @{ client_id = $Saviynt_Oauth_ClientID; client_secret = $Saviynt_Oauth_Secret; grant_type = 'client_credentials'; scope = "$SaviyntApiScope/.default" }
     $uriToken = "https://login.microsoftonline.com:443/$tenantId/oauth2/v2.0/token"
     try { $bearer = Invoke-RestMethod -Method POST -Uri $uriToken -Body $bodyToken }
-    catch { Write-Log "Saviynt OAuth token failed for E1 downgrade: $($_.Exception.Message)" -Level ERROR; ScriptError "Saviynt OAuth token failed (E1 downgrade)."; return }
+    catch { Write-Log "Saviynt OAuth token failed for E1 downgrade: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt OAuth token failed (E1 downgrade)." -UserUPNForError $UserUPNForE1; return }
     
     $bodyUserLookup = @{ customproperty16 = $UserUPNForE1; max = 100; offset = 0 }
     $headerUserLookup = @{ 'Content-Type' = 'application/x-www-form-urlencoded'; Authorization = "Bearer $($bearer.access_token)" }
     $paramsUserLookup = @{ method = 'GET'; uri = "$SaviyntApiBaseUrl/identity-api/v1/users"; headers = $headerUserLookup; body = $bodyUserLookup }
     try { $result = Invoke-RestMethod @paramsUserLookup -ErrorAction Stop }
-    catch { Write-Log "Saviynt user lookup for $UserUPNForE1 (E1 downgrade) failed: $($_.Exception.Message)" -Level ERROR; ScriptError "Saviynt user lookup failed (E1 downgrade)."; return }
+    catch { Write-Log "Saviynt user lookup for $UserUPNForE1 (E1 downgrade) failed: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt user lookup failed (E1 downgrade)." -UserUPNForError $UserUPNForE1; return }
 
     Write-Log "Saviynt user lookup attributes for $UserUPNForE1 (E1 downgrade): $($result.attributes | ConvertTo-Json -Depth 3)" -Level DEBUG
     $BPIdentityAPITransactionID = (New-Guid).Guid -replace '-[a-f|0-9]{12}$'
@@ -1225,8 +1327,9 @@ function Invoke-DowngradeToE1 {
             $bodyUpdate = @{ attributes = @{ customproperty53 = @{ value = $E1_customproperty53 }; customproperty63 = @{ value = $E1_customproperty63 } } }
             $paramsUpdate = @{ method = 'PUT'; uri = "$SaviyntApiBaseUrl/identity-api/v1/async/users/$saviyntUserSystemName"; headers = $headerUpdate; body = ($bodyUpdate | ConvertTo-Json) }
 
+            Write-Log "Invoke-DowngradeToE1: Requesting Saviynt E1 downgrade for $UserUPNForE1 (SystemUserName: $saviyntUserSystemName). URI: $($paramsUpdate.uri), TransactionID: DWP-devhub-$BPIdentityAPITransactionID" -Level 'VERBOSE'
             try { $TransactionResponse = Invoke-RestMethod @paramsUpdate -ErrorAction Stop }
-            catch { Write-Log "Saviynt E1 downgrade request for $UserUPNForE1 failed: $($_.Exception.Message)" -Level ERROR; ScriptError "Saviynt E1 downgrade request failed."; return }
+            catch { Write-Log "Saviynt E1 downgrade request for $UserUPNForE1 failed: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt E1 downgrade request failed." -UserUPNForError $UserUPNForE1; return }
             
             $TransactionID = $TransactionResponse.TRACKING_ID
             Write-Log "Saviynt E1 downgrade request for $UserUPNForE1 logged. Tracking ID: $TransactionID" -Level INFO
@@ -1315,9 +1418,10 @@ function Get-SnowAccessToken {
     }
     $tokenUri = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
     try {
-        Write-Log "Attempting to get SNOW Access Token from $tokenUri for scope $SnowApiScopeForToken (Client ID: $SnowClientIdForToken)" -Level DEBUG
+        Write-Log "Attempting to get SNOW Access Token from $tokenUri for scope $SnowApiScopeForToken (Client ID: $SnowClientIdForToken)" -Level DEBUG # Existing good log
         $SnowTokenResponse = Invoke-RestMethod -Uri $tokenUri -Method POST -Body $tokenBody -ErrorAction Stop
         if ($SnowTokenResponse -and $SnowTokenResponse.access_token) {
+            Write-Log "Successfully retrieved SNOW Access Token for scope $SnowApiScopeForToken (Client ID: $SnowClientIdForToken)." -Level 'DEBUG'
             return $SnowTokenResponse.access_token
         } else {
             Write-Log "SNOW Access Token response did not contain an access_token. Response: $($SnowTokenResponse | ConvertTo-Json -Depth 3)" -Level ERROR
@@ -1469,7 +1573,7 @@ switch ($AutomationAccountName) {
         $Saviynt_Secret_KV_Name = 'SaviyntApi-Secret'
     }
     Default {
-        ScriptError "AutomationAccountName '$AutomationAccountName' is not recognized. Exiting."
+        ScriptError -msg "AutomationAccountName '$AutomationAccountName' is not recognized. Exiting."
         exit
     }
 }
@@ -1521,7 +1625,7 @@ try {
     }
     # Critical check for SNOW token after attempting to fetch/generate it.
     if(-not $SNOW_Oauth_Token) {
-        ScriptError -msg "SNOW_Oauth_Token is NOT available after configuration attempts. SNOW-dependent operations will fail. This is a critical failure. Please check previous logs for specific errors in token retrieval or generation."
+        ScriptError -msg "SNOW_Oauth_Token is NOT available after configuration attempts. SNOW-dependent operations will fail. This is a critical failure. Please check previous logs for specific errors in token retrieval or generation." # No user context here
         # Consider adding 'exit' here if script cannot function without SNOW token.
         # For now, ScriptError logs it, and script would continue, but SNOW calls would fail.
         # Adding an explicit exit for such a critical dependency:
@@ -1537,17 +1641,19 @@ try {
 }
 catch {
     $ex = $_.Exception.Message
-    ScriptError -msg "Failed to get critical secrets from KeyVault '$KeyvaultName': $ex"
+    ScriptError -msg "Failed to get critical secrets from KeyVault '$KeyvaultName': $ex" # No user context here
     exit
 }
 
 # Dataverse Authentication
+Write-Log "Attempting to retrieve Dataverse access token for AppID '$Dataverse_AppID'." -Level 'DEBUG'
 $tokenBodyDV = @{ grant_type = 'client_credentials'; client_id = $Dataverse_AppID; client_secret = $Dataverse_ClientSecret; resource = $DataverseEnvironmentURL }
 try {
     $tokenResponseDV = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$tenantId/oauth2/token" -Method Post -Body $tokenBodyDV -ContentType 'application/x-www-form-urlencoded'
     $accessTokenDV = $tokenResponseDV.access_token
+    Write-Log "Successfully retrieved Dataverse access token." -Level 'DEBUG'
 }
-catch { $ex = $_.Exception.Message; ScriptError -msg "Failed to get Dataverse access token: $ex"; exit }
+catch { $ex = $_.Exception.Message; ScriptError -msg "Failed to get Dataverse access token: $ex"; exit } # No user context here
 
 $Dataverseheaders = @{ Authorization = "Bearer $accessTokenDV"; 'Content-Type' = 'application/json'; 'OData-MaxVersion' = '4.0'; 'OData-Version' = '4.0'; Accept = 'application/json' }
 $lic_category_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/crd15_license_categories"
@@ -1567,13 +1673,13 @@ try {
     $E5_customproperty53_true = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_true') }).new_Value
     $E5_customproperty53_false = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_false') }).new_Value
 }
-catch { $ex = $_.Exception.Message; ScriptError -msg "Failed to get Dataverse config (categories/attributes): $ex"; exit }
+catch { $ex = $_.Exception.Message; ScriptError -msg "Failed to get Dataverse config (categories/attributes): $ex"; exit } # No user context here
 
 
 # Fetch all messages from DB
 try {
     $dbmessagesAll = Invoke-Sqlquery -qry "Select * from Licensing_Dev.LicenseRequestView where status in ('New', 'In-Progress','Pending Training','On-Hold')"
-} catch { ScriptError('Failed to fetch messages from DB.'); exit }
+} catch { ScriptError -msg 'Failed to fetch messages from DB.'; exit } # No user context here
 
 $numberOfMessagesTotal = $dbmessagesAll.count
 Write-Log "Total messages fetched from DB: $numberOfMessagesTotal" -Level 'INFO'
@@ -1602,9 +1708,25 @@ $i = 0
 foreach ($messageString in $dbmessagesAll) {
     $i++
     Write-Log "########################## PROCESSING MESSAGE $i OF $numberOfMessagesTotal ##########################" -Level 'INFO'
-    Start-Sleep -Seconds 1 # Small delay between messages
+    
+    # Initialize per-message variables for context in catch block
+    $ID = $null
+    $userUPN = $null
+    $LicenseType = $null
+    $action = $null
+    $RITMNumber = $null
+    $TaskNumber = $null
+    $RequestedBy = $null
+    $licenseCategorizationID = $null
+    $RequestedDate = $null
+    $ProcessedDate = $null
+    $LAppCase = $null
+    # $saviyntRequestReferenceIDs is already reset at the top of the loop if needed by E1/E5
 
-    # Reset message-specific variables
+    try {
+        Start-Sleep -Seconds 1 # Small delay between messages
+
+        # Reset message-specific variables
     $saviyntRequestReferenceIDs = $null # Crucial for E1/E5 logic
     $LAppCase = $null # Reset LAppCase from previous iteration
 
@@ -1662,21 +1784,31 @@ foreach ($messageString in $dbmessagesAll) {
         $errMsg = $_.Exception.Message
         if ($errMsg -like '*Request_ResourceNotFound*') {
             Write-Log "User $userUPN not found in Entra." -Level WARN
-            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Invalid user in Entra (Not Found)' WHERE ID = $ID;"
+            try {
+                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Invalid user in Entra (Not Found)' WHERE ID = $ID;"
+            } catch {
+                $sqlExMsg = $_.Exception.Message
+                ScriptError -msg "SQL update failed for 'User Not Found in Entra' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+            }
             # Dataverse Log for not found user (simplified ScriptError call)
-            ScriptError -msg "User $userUPN not found in Entra." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber # etc.
+            ScriptError -msg "User $userUPN not found in Entra." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             Update-TaskStatus -TicketNumber $TaskNumber -State '9' -WorkNotes "User $userUPN not found in Entra. Request cancelled." # E1E5 logic
             continue
         } else {
-            ScriptError -msg "Error validating user $userUPN in Entra: $errMsg"
+            ScriptError -msg "Error validating user $userUPN in Entra: $errMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             continue
         }
     }
 
     if (-not $UserEnabled) {
         Write-Log "User $userUPN account is disabled in Entra." -Level WARN
-        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'User account disabled in Entra' WHERE ID = $ID;"
-        ScriptError -msg "User $userUPN account disabled in Entra."
+        try {
+            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'User account disabled in Entra' WHERE ID = $ID;"
+        } catch {
+            $sqlExMsg = $_.Exception.Message
+            ScriptError -msg "SQL update failed for 'User Account Disabled' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+        }
+        ScriptError -msg "User $userUPN account disabled in Entra." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
         Update-TaskStatus -TicketNumber $TaskNumber -State '9' -WorkNotes "User $userUPN account disabled in Entra. Request cancelled." # E1E5 logic
         continue
     }
@@ -1688,7 +1820,12 @@ foreach ($messageString in $dbmessagesAll) {
             $closedStateCodes = @('3', '4', '7', '9') # 3=Closed Complete, 4=Closed Incomplete, 7=Closed Skipped, 9=Cancelled (example states)
             if ($closedStateCodes -contains $RITMInfo.state) {
                 Write-Log "RITM $RITMNumber for $userUPN is already closed (State: $($RITMInfo.state), Stage: $($RITMInfo.stage)). Skipping request." -Level INFO
-                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'RITM already closed' WHERE ID = $ID;"
+                try {
+                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'RITM already closed' WHERE ID = $ID;"
+                } catch {
+                    $sqlExMsg = $_.Exception.Message
+                    ScriptError -msg "SQL update failed for 'RITM Already Closed' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+                }
                 # Dataverse log for RITM closed
                 $completionTimeClosedRitm = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
                 $dvBodyClosedRitm = @{
@@ -1726,7 +1863,12 @@ foreach ($messageString in $dbmessagesAll) {
             Write-Log "User $userUPN already has a Copilot license. Closing RITM/Task and DB record." -Level INFO
             Update-TicketStatus -TicketNumber $RITMNumber -State '3' -Stage 'Completed' -WorkNotes 'User already has Copilot license. Request completed.'
             Update-TaskStatus -TicketNumber $TaskNumber -State '3' -WorkNotes 'User already has Copilot license. Task closed.'
-            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'User already has Copilot license' WHERE ID = $ID;"
+            try {
+                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'User already has Copilot license' WHERE ID = $ID;"
+            } catch {
+                $sqlExMsg = $_.Exception.Message
+                ScriptError -msg "SQL update failed for 'User Already Has Copilot License' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+            }
             # Dataverse log for already licensed
             $completionTimeAlreadyLicensed = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
             $dvBodyAlreadyLicensed = @{
@@ -1740,13 +1882,13 @@ foreach ($messageString in $dbmessagesAll) {
         
         # Quota Check for Copilot
         $UserExtensionAttribute1 = $MgUser.onPremisesExtensionAttributes.extensionAttribute1
-        if (-not $UserExtensionAttribute1) { ScriptError -msg "User $userUPN onPremisesExtensionAttributes.extensionAttribute1 (Entity) is missing."; continue }
+        if (-not $UserExtensionAttribute1) { ScriptError -msg "User $userUPN onPremisesExtensionAttributes.extensionAttribute1 (Entity) is missing." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase; continue }
         
         $AvailableEntityLicenses = Get-EntityQuota -UserEntity $UserExtensionAttribute1
         $TnSEntityQuotaAvailable = Get-EntityQuota -UserEntity 'Supply, Trading & Shipping' # Specifically get T&S quota
 
         if ($null -eq $AvailableEntityLicenses -or $null -eq $TnSEntityQuotaAvailable) {
-            ScriptError -msg "Could not retrieve full quota details for $userUPN (Entity: $UserExtensionAttribute1). Halting Copilot processing for user."
+            ScriptError -msg "Could not retrieve full quota details for $userUPN (Entity: $UserExtensionAttribute1). Halting Copilot processing for user." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             continue
         }
 
@@ -1782,20 +1924,25 @@ foreach ($messageString in $dbmessagesAll) {
                         $LAppCase = $LAppCaseNumberFromSF
                     }
                     Write-Log "LApp Case for $userUPN: $LAppCase. Updating DB and SNOW." -Level INFO
-                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 3, LAppCase='$LAppCase', LAppCaseCreatedDate = GETUTCDATE(), ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'SOU Training assigned' WHERE ID = $ID;"
+                    try {
+                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 3, LAppCase='$LAppCase', LAppCaseCreatedDate = GETUTCDATE(), ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'SOU Training assigned' WHERE ID = $ID;"
+                    } catch {
+                        $sqlExMsg = $_.Exception.Message
+                        ScriptError -msg "SQL update failed for 'SOU Training Assigned' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+                    }
                     Update-TaskStatus -TicketNumber $TaskNumber -State '6' -WorkNotes "Copilot license approved. LApp case $LAppCase raised. Awaiting training check."
                     Update-TicketStatus -TicketNumber $RITMNumber -State '-5' -Stage 'Pending Training' -WorkNotes "Copilot license approved. LApp case $LAppCase raised. Awaiting training check."
                     Update-EntityQuota -UserEntity $UserExtensionAttribute1 -TicketStage 'Pending Training'
                     # SOU/TOU status will be checked in the next run after LApp case creation
                     $SOUTrainingStatus = "PendingLAppCreation" # Special status to indicate loop should continue to next message
                 } else {
-                    ScriptError -msg "Failed to create or retrieve LApp case for $userUPN."
+                    ScriptError -msg "Failed to create or retrieve LApp case for $userUPN." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase # LAppCase might be null here
                     $SOUTrainingStatus = "ErrorCreatingLApp" # Stop processing this user
                 }
             } else { # LAppCase exists, check SOU/TOU
                  Write-Log "Existing LApp case $LAppCase for $userUPN. Checking SOU/TOU status." -Level INFO
                  if (-not $CSODReportPath) {
-                     ScriptError -msg "CSOD Report path not available, cannot check SOU for $userUPN."
+                     ScriptError -msg "CSOD Report path not available, cannot check SOU for $userUPN." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
                      $SOUTrainingStatus = "ErrorNoCSODFile" # Stop processing this user
                  } else {
                     if ($UserExtensionAttribute1 -eq 'Supply, Trading & Shipping') {
@@ -1817,9 +1964,10 @@ foreach ($messageString in $dbmessagesAll) {
                  }
             }
 
-            Write-Log "SOU/TOU Training status for $userUPN: $SOUTrainingStatus" -Level DEBUG
+            Write-Log "MainLoop: SOU/TOU Training status for $userUPN: $SOUTrainingStatus" -Level 'INFO'
 
             if ($SOUTrainingStatus -notin ("PendingLAppCreation", "ErrorCreatingLApp", "ErrorNoCSODFile", "Expired", "PTW_Failed", "PTW_Missing")) {
+                 Write-Log "MainLoop: Attempting Copilot license assignment logic for $userUPN. SOU/TOU Status: $SOUTrainingStatus" -Level 'VERBOSE'
                  $CopilotAssignmentResult = Invoke-UpgradeToCopilot -UserUPN $userUPN -SOUTrainingStatusToUse $SOUTrainingStatus -UserEntraGUID $MgUser.Id `
                                             -TaskNumberToUpdate $TaskNumber -RITMNumberToUpdate $RITMNumber -LAppCaseFromContext $LAppCase `
                                             -UserExtensionAttribute1ForQuota $UserExtensionAttribute1 -DBRecordIDForFailureUpdate $ID `
@@ -1832,7 +1980,12 @@ foreach ($messageString in $dbmessagesAll) {
                     if ($UserExtensionAttribute1 -eq 'Supply, Trading & Shipping') {
                         Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot for M365 – additional guidance for Trading & Shipping' -StorageAccountNameForEmail $StorageAccountName -ContainerNameForEmail $CopilotEmailTemplateContainer -TemplateName 'getting_started_with_copilot_T&S.html' -Replacements @{}
                     }
-                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'License assigned' WHERE ID = $ID;"
+                    try {
+                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'License assigned' WHERE ID = $ID;"
+                    } catch {
+                        $sqlExMsg = $_.Exception.Message
+                        ScriptError -msg "SQL update failed for 'Copilot License Assigned' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+                    }
                     # Dataverse log for assigned
                     $completionTimeAssigned = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
                     $dvBodyAssigned = @{
@@ -1840,6 +1993,7 @@ foreach ($messageString in $dbmessagesAll) {
                         new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeAssigned
                         new_lappcasenumber = $LAppCase; new_status = 'Completed'; new_errorcode = $null
                     } | ConvertTo-Json
+                Write-Log "MainLoop: Attempting to log Copilot license assignment success to Dataverse for UPN $userUPN. Status: Completed" -Level 'VERBOSE'
                     Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyAssigned
                     Update-TaskStatus -TicketNumber $TaskNumber -State '3' -WorkNotes 'Copilot license assigned. Task closed.'
                     Update-TicketStatus -TicketNumber $RITMNumber -State '3' -Stage 'Completed' -WorkNotes 'Copilot license assigned. RITM closed.'
@@ -1850,7 +2004,7 @@ foreach ($messageString in $dbmessagesAll) {
                     Write-Log "Copilot license processing for $userUPN ended with status: $CopilotAssignmentResult / $SOUTrainingStatus. Record should be closed." -Level INFO
                     # Invoke-UpgradeToCopilot or Get-SOUStatus should have handled DB/SNOW/Dataverse updates for failure.
                 } else { # Error states from Invoke-UpgradeToCopilot
-                     ScriptError -msg "Error during Copilot license assignment for $userUPN. Result: $CopilotAssignmentResult. SOU Status: $SOUTrainingStatus"
+                     ScriptError -msg "Error during Copilot license assignment for $userUPN. Result: $CopilotAssignmentResult. SOU Status: $SOUTrainingStatus" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
                 }
             } # End if not LAppCreation/Error states
         } else { # No Quota
@@ -1859,7 +2013,12 @@ foreach ($messageString in $dbmessagesAll) {
             $onHoldEmailSubject = if ($EmailSentCount -lt 1) { 'Copilot license processing on-hold' } else { 'Copilot license processing still on-hold' }
             Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject $onHoldEmailSubject -StorageAccountNameForEmail $StorageAccountName -ContainerNameForEmail $CopilotEmailTemplateContainer -TemplateName $onHoldEmailTemplate -Replacements @{}
             $EmailSentCount++
-            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 4, EmailSentCount=$EmailSentCount, EmailSentDate = GETUTCDATE(), ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Copilot license on-hold (quota)' WHERE ID = $ID;"
+            try {
+                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 4, EmailSentCount=$EmailSentCount, EmailSentDate = GETUTCDATE(), ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Copilot license on-hold (quota)' WHERE ID = $ID;"
+            } catch {
+                $sqlExMsg = $_.Exception.Message
+                ScriptError -msg "SQL update failed for 'Copilot License On-Hold (Quota)' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+            }
             Update-TicketStatus -TicketNumber $RITMNumber -Stage 'Waiting List' -State '5' -WorkNotes 'Copilot licenses for entity/tenant at capacity. Request on waiting list.'
             try { New-MgGroupMember -GroupId $CopilotPendingGroupID -DirectoryObjectId $MgUser.Id } catch { Write-Log "Failed to add $userUPN to Copilot pending group $CopilotPendingGroupID: $($_.Exception.Message)" -Level WARN }
         }
@@ -1877,7 +2036,12 @@ foreach ($messageString in $dbmessagesAll) {
             $completionCommentE1E5 = "User already has target M365 license ($action)"
             Update-TicketStatus -TicketNumber $RITMNumber -State '3' -Stage 'Completed' -WorkNotes $completionCommentE1E5
             Update-TaskStatus -TicketNumber $TaskNumber -State '3' -WorkNotes $completionCommentE1E5
-            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$completionCommentE1E5' WHERE ID = $ID;"
+            try {
+                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$completionCommentE1E5' WHERE ID = $ID;"
+            } catch {
+                $sqlExMsg = $_.Exception.Message
+                ScriptError -msg "SQL update failed for 'E1/E5 Already Has Target License' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+            }
             # Dataverse log
             $completionTimeE1E5Done = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
             $dvBodyE1E5Done = @{
@@ -1890,8 +2054,9 @@ foreach ($messageString in $dbmessagesAll) {
         }
 
         # Saviynt replication check for previously processed items
+        Write-Log "MainLoop: Checking Saviynt replication status for $userUPN (Action: $action, DB SaviyntTrackID: $SaviyntTrackIDFromDB)." -Level 'VERBOSE'
         if (-not ([string]::IsNullOrEmpty($SaviyntExitCodeFromDB)) -and $SaviyntExitCodeFromDB -ne "Success" -and $SaviyntExitCodeFromDB -notlike "NotE5InSaviynt*" ) { # If there was a Saviynt error code that isn't "Success" or "NotE5..."
-             Write-Log "Previous Saviynt attempt for $userUPN had error: $SaviyntExitCodeFromDB. Snow Task: $SnowTicketNumberFromDB. Not reprocessing via Saviynt." -Level WARN
+             Write-Log "MainLoop: Previous Saviynt attempt for $userUPN had error: $SaviyntExitCodeFromDB. Snow Task: $SnowTicketNumberFromDB. Not reprocessing via Saviynt." -Level WARN
              # This request might need manual intervention based on the SnowTask.
              # For now, we will not re-attempt Saviynt. If it needs to be re-queued, status in DB should be reset.
              # Update RITM worknotes if needed
@@ -1906,7 +2071,12 @@ foreach ($messageString in $dbmessagesAll) {
                 $completionCommentE1E5Rep = "License $action replicated (Saviynt: $SaviyntTrackIDFromDB)"
                 Update-TicketStatus -TicketNumber $RITMNumber -State '3' -Stage 'Completed' -WorkNotes $completionCommentE1E5Rep
                 Update-TaskStatus -TicketNumber $TaskNumber -State '3' -WorkNotes $completionCommentE1E5Rep
-                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$completionCommentE1E5Rep' WHERE ID = $ID;"
+                try {
+                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$completionCommentE1E5Rep' WHERE ID = $ID;"
+                } catch {
+                    $sqlExMsg = $_.Exception.Message
+                    ScriptError -msg "SQL update failed for 'E1/E5 License Replicated' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase -saviyntRequestReferenceIDsForError $saviyntRequestReferenceIDs
+                }
                 # Dataverse Log
                 $completionTimeE1E5Rep = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
                 $dvBodyE1E5Rep = @{
@@ -1914,6 +2084,7 @@ foreach ($messageString in $dbmessagesAll) {
                     new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeE1E5Rep
                     new_saviynttrackingid = $SaviyntTrackIDFromDB; new_saviynttransactionid = $SaviyntTransactionIDFromDB; new_status = 'Success'; new_errorcode = $null
                 } | ConvertTo-Json
+                Write-Log "MainLoop: Attempting to log M365 license replicated status to Dataverse for UPN $userUPN. Status: Success" -Level 'VERBOSE'
                 Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyE1E5Rep
                 continue
             } else {
@@ -1923,7 +2094,12 @@ foreach ($messageString in $dbmessagesAll) {
                     $ShortDescRep = "Failure; M365 License Replication Delay for $userUPN ($action)"
                     $DescriptionRep = "M365 license $action for $userUPN not replicated after 6 hours. Saviynt Tracking ID: $SaviyntTrackIDFromDB. Investigate."
                     $replicationTicket = New-SnowTask -shortDescription $ShortDescRep -Description $DescriptionRep -UserUPN $userUPN -TicketType "ReplicationTask" -cmdb_ci "Digital Collaboration Tools"
-                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET snowTicketNumber = '$replicationTicket', Comments = ISNULL(Comments + ' | ', '') + 'Replication task $replicationTicket logged.' WHERE ID = $ID;"
+                    try {
+                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET snowTicketNumber = '$replicationTicket', Comments = ISNULL(Comments + ' | ', '') + 'Replication task $replicationTicket logged.' WHERE ID = $ID;"
+                    } catch {
+                        $sqlExMsg = $_.Exception.Message
+                        ScriptError -msg "SQL update failed for 'E1/E5 Replication Task Logged' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase -saviyntRequestReferenceIDsForError $saviyntRequestReferenceIDs
+                    }
                     Update-TicketStatus -TicketNumber $RITMNumber -WorkNotes "License $action not replicated after 6 hours. SNOW task $replicationTicket created for follow-up."
                 } else {
                      Write-Log "M365 license ($action) for $userUPN not yet replicated (Saviynt: $SaviyntTrackIDFromDB). Will check again next run." -Level INFO
@@ -1937,19 +2113,26 @@ foreach ($messageString in $dbmessagesAll) {
         if (([string]::IsNullOrEmpty($SaviyntTrackIDFromDB)) -or ($action -eq "downgrade" -and $SaviyntExitCodeFromDB -eq "NotE5InSaviyntNoDowngradeNeeded") ) {
             $ThisRunProcessedE1E5++ # Count this as a new Saviynt attempt
             $saviyntActionResult = $null
+            Write-Log "MainLoop: Attempting M365 $action for $userUPN via Saviynt." -Level 'VERBOSE'
             if ($action -eq 'upgrade') {
                 # Check E5 License Pool (example from E1-E5, might need adjustment)
-                $e5_skus = Get-MgSubscribedSku | Where-Object { $_.SkuPartNumber -eq 'SPE_E5' }
-                $availableE5Licenses = $e5_skus.PrepaidUnits.Enabled - $e5_skus.ConsumedUnits
-                $e5Threshold = $availableE5Licenses / 2 # Example threshold
+                $e5_skus = Get-MgSubscribedSku | Where-Object { $_.SkuPartNumber -eq 'SPE_E5' } 
+                $availableE5Licenses = if($e5_skus) {$e5_skus.PrepaidUnits.Enabled - $e5_skus.ConsumedUnits} else {0} # Ensure $e5_skus is not null
+                $e5Threshold = $availableE5Licenses / 2 
+                Write-Log "MainLoop: Checking E5 license pool. Available: $availableE5Licenses, Threshold: $e5Threshold." -Level 'DEBUG'
                 if ($availableE5Licenses -gt $e5Threshold) {
-                    Write-Log "Attempting E5 upgrade for $userUPN via Saviynt." -Level INFO
+                    # Invoke-UpgradeToE5 already logs "Attempting E5 upgrade..." at INFO level
                     Invoke-UpgradeToE5 -UserUPNForE5 $userUPN
                     $saviyntActionResult = "Processed"
                 } else {
                     Write-Log "Not enough E5 licenses in tenant pool ($availableE5Licenses available, threshold $e5Threshold). Upgrade for $userUPN on hold." -Level WARN
                     Update-TicketStatus -TicketNumber $RITMNumber -State '5' -Stage 'On Hold' -WorkNotes "E5 license pool low. Request on hold." # Or similar status
-                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 4, Comments = ISNULL(Comments + ' | ', '') + 'E5 pool low, on hold.' WHERE ID = $ID;" # StatusID 4 for On-Hold
+                    try {
+                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 4, Comments = ISNULL(Comments + ' | ', '') + 'E5 pool low, on hold.' WHERE ID = $ID;" # StatusID 4 for On-Hold
+                    } catch {
+                        $sqlExMsg = $_.Exception.Message
+                        ScriptError -msg "SQL update failed for 'E5 Pool Low - On Hold' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+                    }
                     $saviyntActionResult = "SkippedNoPool"
                 }
             } elseif ($action -eq 'downgrade') {
@@ -1980,8 +2163,12 @@ foreach ($messageString in $dbmessagesAll) {
                 } else { # Success or NotE5...
                      Update-TicketStatus -TicketNumber $RITMNumber -WorkNotes "Request for $action $LicenseType sent to Saviynt. Tracking ID: $($saviyntRequestReferenceIDs.trackingID). Replication may take up to 6 hours."
                 }
-                
-                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = $dbStatusIDForSaviynt, ProcessedDate = GETUTCDATE(), SaviyntTrackID = '$($saviyntRequestReferenceIDs.trackingID)', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', snowTicketNumber = '$($saviyntRequestReferenceIDs.SnowTaskNumber)', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$dbCommentsSaviynt' WHERE ID = $ID;"
+                try {
+                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = $dbStatusIDForSaviynt, ProcessedDate = GETUTCDATE(), SaviyntTrackID = '$($saviyntRequestReferenceIDs.trackingID)', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', snowTicketNumber = '$($saviyntRequestReferenceIDs.SnowTaskNumber)', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$dbCommentsSaviynt' WHERE ID = $ID;"
+                } catch {
+                    $sqlExMsg = $_.Exception.Message
+                    ScriptError -msg "SQL update failed for 'Saviynt Action Processed' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase -saviyntRequestReferenceIDsForError $saviyntRequestReferenceIDs
+                }
                 # Dataverse log for initial Saviynt submission (even if ExitCode is an error, it's an outcome of this attempt)
                 $completionTimeSavSub = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
                 $dvBodySavSub = @{
@@ -1992,17 +2179,32 @@ foreach ($messageString in $dbmessagesAll) {
                     new_errorcode = if ($saviyntRequestReferenceIDs.ExitCode -ne "Success" -and $saviyntRequestReferenceIDs.ExitCode -ne "NotE5InSaviyntNoDowngradeNeeded") { $saviyntRequestReferenceIDs.ExitCode } else { $null }
                     new_snowtasknumber = $saviyntRequestReferenceIDs.SnowTaskNumber
                 } | ConvertTo-Json
+                Write-Log "MainLoop: Attempting to log Saviynt submission status to Dataverse for UPN $userUPN. Status: $($dvBodySavSub.new_status)" -Level 'VERBOSE'
                 Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodySavSub
             }
         } # End if new Saviynt processing needed
 
     } else {
         Write-Log "Unsupported LicenseType: '$LicenseType' for UPN: $userUPN. Skipping." -Level WARN
-        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Unsupported LicenseType ($LicenseType)' WHERE ID = $ID;"
-        ScriptError -msg "Unsupported LicenseType '$LicenseType'"
+        try {
+            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Unsupported LicenseType ($LicenseType)' WHERE ID = $ID;"
+        } catch {
+            $sqlExMsg = $_.Exception.Message
+            ScriptError -msg "SQL update failed for 'Unsupported LicenseType' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
+        }
+        ScriptError -msg "Unsupported LicenseType '$LicenseType'" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
         Update-TaskStatus -TicketNumber $TaskNumber -State '4' -WorkNotes "Unsupported LicenseType '$LicenseType'. Request cancelled."
         continue
     }
+    Write-Log "Successfully completed processing for DB_ID: $($ID | Out-String -Stream), UPN: $($userUPN | Out-String -Stream)." -Level 'INFO'
+    } # End Try
+    catch {
+        $unexpectedException = $_.Exception
+        # Use Out-String -Stream to safely handle potentially $null variables in the error message
+        $errorMessage = "Unexpected error processing message DB_ID: $($ID | Out-String -Stream) UPN: $($userUPN | Out-String -Stream) LicenseType: $($LicenseType | Out-String -Stream) Action: $($action | Out-String -Stream). Error: $($unexpectedException.Message). StackTrace: $($unexpectedException.StackTrace)"
+        Write-Log $errorMessage -Level 'ERROR'
+        # The loop will continue to the next message automatically.
+    } # End Catch
 } # End foreach message
 
 # Disconnect (common)
