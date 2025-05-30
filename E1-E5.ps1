@@ -26,6 +26,19 @@ $ProcessCutoff = 100
 $TestMode = $false
 if ($TestMode) { Write-Output 'TESTMODE ENABLED' }
 
+# Hardcoded Saviynt Attribute Mapping Variables
+# IMPORTANT: Replace these placeholder values with the actual values from your environment.
+$E1_customproperty53 = "PLACEHOLDER_E1_customproperty53" # Example: "false" or specific string
+$E1_customproperty65 = "PLACEHOLDER_E1_customproperty65" # Example: "Exchange Online (Plan 1)"
+$E1_customproperty63 = "PLACEHOLDER_E1_customproperty63" # Example: "STANDARDWOFFPACK_IW"
+$E1_attributes65 = "PLACEHOLDER_E1_attributes65"         # Example: "Online"
+
+$E5_customproperty63 = "PLACEHOLDER_E5_customproperty63" # Example: "ENTERPRISEPREMIUM_IW"
+$E5_customproperty53_true = "PLACEHOLDER_E5_customproperty53_true"   # Example: "true"
+$E5_customproperty53_false = "PLACEHOLDER_E5_customproperty53_false" # Example: "false"
+
+Write-Log "Using hardcoded Saviynt attribute mapping variables. Ensure these are correctly set for your environment." -Level "WARN"
+
 ### START FUNCTION DEFINITIONS ###
 Function Write-Log {
     param(
@@ -65,74 +78,43 @@ Function ScriptError {
     )
 
     $respObj = @{
-        UPN   = $UserUPN
+        UPN   = $UserUPN # Ensure $UserUPN is available in this scope
         Error = $msg
     }
     $response = $respObj | ConvertTo-Json
 
-    Write-Log $msg
-    Write-Log $response
-    Write-Log 'One or more errors occurred, Refer the output screen for details' -Level INFO
-}
-
-Function ScriptError {
-    param(
-        $msg
-    )
-
-    $respObj = @{
-        UPN   = $UserUPN
-        Error = $msg
-    }
-    $response = $respObj | ConvertTo-Json
-
-    Write-Log $msg
-    Write-Log $response
-    Write-Log 'One or more errors occurred, Refer the output screen for details' -Level INFO
+    Write-Log $msg -Level 'ERROR'
+    Write-Log $response -Level 'ERROR'
+    Write-Log 'One or more errors occurred, Refer the output screen for details' -Level 'ERROR' # Changed to ERROR
 
     $ShortDesc = 'Failure; Automatic Fulfilment Not Possible - M365 License'
     try{
-       # $ticket = New-SnowTask -shortDescription $ShortDesc -Description $response -UserUPN $UserUPN
-       # write-log "SNOW ticket logged: $ticket"
+       # $ticket = New-SnowTask -shortDescription $ShortDesc -Description $response -UserUPN $UserUPN # $ticket variable is not used in the new SQL update logic for comments.
+       # Write-Log "SNOW ticket logged: $ticket" -Level 'INFO'
     }
     catch {
         $ex = $_.Exception.Message
-        write-log $ex
+        Write-Log $ex -Level 'ERROR'
     }
-    
-    # Add Error message to Dataverse
+
+    # Update DB entry with error status and message
     try {
-        $bodyContent = @{
-            new_requestedby                          = $RequestedBy
-            new_requestedfor                         = $userUPN
-            'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"
-            new_action                               = $action
-            new_requestsource                        = 'DWP-Automation'
-            new_requesttime                          = $RequestedTime
-            new_processedtime                        = $ProcessedTime
-            new_completiontime                       = $completionTime
-            new_lappcasenumber                       = $null
-            new_saviynttrackingid                    = $saviyntRequestReferenceIDs.trackingID
-            new_status                               = "Error - $ticket"
-            new_saviynttransactionid                 = $saviyntRequestReferenceIDs.APITransactionID
-            new_errorcode                            = $msg
-        } | ConvertTo-Json
-
-        $DataverseUpdate = Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $bodyContent
-
-        Write-Log 'Message added to Dataverse successfully'
-        Write-Log '#####################################################################'
+        # Ensure $ID is available in this scope. It's typically the ID of the current item being processed in the loop that calls ScriptError.
+        $updateQuery = "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, Comments = ISNULL(Comments + ' | ', '') + 'Error: $msg', UpdatedBy = 'DW-Automation', CompletionDate = GETUTCDATE() WHERE ID = $ID;"
+        Invoke-Sqlquery -qry $updateQuery
+        Write-Log "DB entry for ID $ID updated with error status." -Level 'INFO'
+        Write-Log "**********************************************************************"
+        # This 'continue' is important if ScriptError is called within a loop processing multiple items.
+        # It allows the script to move to the next item instead of halting.
         continue
     }
     catch {
-        write-log $bodyContent
         $ex = $_.Exception.Message
-        write-log $ex
-        write-log 'Failed to POST record in the dataverse table License_queue_request during scriptError.'
-        Write-Log '#####################################################################'
+        Write-Log "Exception during DB update in ScriptError: $($ex)" -Level 'ERROR' # Changed level
+        Write-Log "Failed to update DB entry for ID $ID during ScriptError." -Level 'ERROR'
+        Write-Log "**********************************************************************"
         continue
     }
-    
 }
 
 Function New-SnowTask {
@@ -836,117 +818,120 @@ switch ($AutomationAccountName) {
         $StorageAccountSubscription = 'zne-evcs-n-dwp-sbc'
         $StorageAccountNameRSG = 'ZNE-EVCS-N-17-DWP-RSG'
         $StorageAccountName = 'zneevcsn17dwpappstg'
-        $DataverseEnvironmentURL = 'https://orga8dae9a2.crm4.dynamics.com'
+        # $DataverseEnvironmentURL = 'https://orga8dae9a2.crm4.dynamics.com' # Removed
         $KeyvaultName = 'zne-dwp-n-kvl'
-        $E1_GUID = '135f4d11-300d-ef11-9f8a-6045bd8865c3'
-        $E5_GUID = 'db56a5c3-250d-ef11-9f89-000d3a222c58'
+        # $E1_GUID = '135f4d11-300d-ef11-9f8a-6045bd8865c3' # Removed
+        # $E5_GUID = 'db56a5c3-250d-ef11-9f89-000d3a222c58' # Removed
         $TestMode = $true
     }
     'AA-DWP-Prod' { 
         $StorageAccountSubscription = 'zne-evcs-p-dwp-sbc'
         $StorageAccountNameRSG = 'ZNE-EVCS-P-27-DWP-RSG'
         $StorageAccountName = 'zneevcspdwpstg'
-        $DataverseEnvironmentURL = 'https://orgee396095.crm4.dynamics.com'
+        # $DataverseEnvironmentURL = 'https://orgee396095.crm4.dynamics.com' # Removed
         $KeyvaultName = 'zne-dwp-p-kvl'
-        $E1_GUID = '52bf2013-2e27-ef11-840a-000d3a660d83'
-        $E5_GUID = '54586b15-2e27-ef11-840a-000d3ab44827'
+        # $E1_GUID = '52bf2013-2e27-ef11-840a-000d3a660d83' # Removed
+        # $E5_GUID = '54586b15-2e27-ef11-840a-000d3ab44827' # Removed
     }
 }
 
-try {
-    Set-AzContext -Subscription 'zne-evcs-p-dwp-sbc'
-}
-catch {
-    $ex = $_.Exception.Message
-    write-log $ex
-    Write-Log 'Failed to set azcontext to get Dataverse app ID and Secret.'
-}
+# The following Set-AzContext and Key Vault fetches for Dataverse AppID/Secret are no longer needed.
+# try {
+#     Set-AzContext -Subscription 'zne-evcs-p-dwp-sbc'
+# }
+# catch {
+#     $ex = $_.Exception.Message
+#     write-log $ex
+#     Write-Log 'Failed to set azcontext to get Dataverse app ID and Secret.'
+# }
 
-try {
-    $Dataverse_AppID = Get-AzKeyVaultSecret -VaultName 'zne-dwp-p-kvl' -Name 'DWP-DevHub-Dataverse-AppID' -AsPlainText
-    $Dataverse_ClientSecret = Get-AzKeyVaultSecret -VaultName 'zne-dwp-p-kvl' -Name 'DWP-DevHub-Dataverse-ClientSecret' -AsPlainText
-}
-catch {
-    $ex = $_.Exception.Message
-    write-log $ex
-    ScriptError -msg "Failed to get Dataverse client ID and Secret`n$($ex.message)"
-}
+# try {
+#     $Dataverse_AppID = Get-AzKeyVaultSecret -VaultName 'zne-dwp-p-kvl' -Name 'DWP-DevHub-Dataverse-AppID' -AsPlainText
+#     $Dataverse_ClientSecret = Get-AzKeyVaultSecret -VaultName 'zne-dwp-p-kvl' -Name 'DWP-DevHub-Dataverse-ClientSecret' -AsPlainText
+# }
+# catch {
+#     $ex = $_.Exception.Message
+#     write-log $ex
+#     ScriptError -msg "Failed to get Dataverse client ID and Secret`n$($ex.message)"
+# }
 
-# Authentication with Azure AD to get the access token
-$tenantId = 'ea80952e-a476-42d4-aaf4-5457852b0f7e'
-$authority = "https://login.microsoftonline.com/$tenantId"
-$tokenEndpoint = "$authority/oauth2/token"
+# Authentication with Azure AD to get the access token for Dataverse - REMOVED
+# $tenantId = 'ea80952e-a476-42d4-aaf4-5457852b0f7e'
+# $authority = "https://login.microsoftonline.com/$tenantId"
+# $tokenEndpoint = "$authority/oauth2/token"
 
-$body = @{
-    grant_type    = 'client_credentials'
-    client_id     = $Dataverse_AppID
-    client_secret = $Dataverse_ClientSecret
-    resource      = $DataverseEnvironmentURL
-}
+# $body = @{
+#     grant_type    = 'client_credentials'
+#     client_id     = $Dataverse_AppID
+#     client_secret = $Dataverse_ClientSecret
+#     resource      = $DataverseEnvironmentURL
+# }
 
-try {
-    # Obtain the access token
-    $tokenResponse = Invoke-RestMethod -Uri $tokenEndpoint -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded'
-    $accessToken = $tokenResponse.access_token
-}
-catch {
-    $ex = $_.Exception.Message
-    write-log $ex
-    $body
-    ScriptError -msg "Failed to get access token from Dataverse`n$($ex.message)"
-}
-# Construct the API request headers with the access token
-$Dataverseheaders = @{
-    Authorization      = "Bearer $accessToken"
-    'Content-Type'     = 'application/json'
-    'OData-MaxVersion' = '4.0'
-    'OData-Version'    = '4.0'
-    Accept             = 'application/json'
-}
+# try {
+#     # Obtain the access token
+#     $tokenResponse = Invoke-RestMethod -Uri $tokenEndpoint -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded'
+#     $accessToken = $tokenResponse.access_token
+# }
+# catch {
+#     $ex = $_.Exception.Message
+#     write-log $ex
+#     $body
+#     ScriptError -msg "Failed to get access token from Dataverse`n$($ex.message)"
+# }
 
-try {
+# Construct the API request headers with the access token - REMOVED
+# $Dataverseheaders = @{
+#     Authorization      = "Bearer $accessToken"
+#     'Content-Type'     = 'application/json'
+#     'OData-MaxVersion' = '4.0'
+#     'OData-Version'    = '4.0'
+#     Accept             = 'application/json'
+# }
+
+# Dataverse API calls and attribute mapping logic - REMOVED
+# try {
     # Define the API endpoint for the operation you want to perform
-    $lic_category_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/crd15_license_categories"
-    $lic_attr_map_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/new_license_attribute_mappings"
-    $lic_queue_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/new_license_queue_requests"
+    # $lic_category_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/crd15_license_categories"
+    # $lic_attr_map_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/new_license_attribute_mappings"
+    # $lic_queue_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/new_license_queue_requests"
 
-    $lic_category_response = Invoke-RestMethod -Uri $lic_category_apiUrl -Headers $Dataverseheaders -Method Get
-    $lic_category_response_details = $lic_category_response.value
+    # $lic_category_response = Invoke-RestMethod -Uri $lic_category_apiUrl -Headers $Dataverseheaders -Method Get
+    # $lic_category_response_details = $lic_category_response.value
 
-    $lic_attr_map_response = Invoke-RestMethod -Uri $lic_attr_map_apiUrl -Headers $Dataverseheaders -Method Get
-    $lic_attr_map_response_details = $lic_attr_map_response.value
+    # $lic_attr_map_response = Invoke-RestMethod -Uri $lic_attr_map_apiUrl -Headers $Dataverseheaders -Method Get
+    # $lic_attr_map_response_details = $lic_attr_map_response.value
 
-    $license_attr_mapping_record = @()
-    for ($i = 0; $i -lt $lic_attr_map_response_details.count; $i++) {
-        $license_attr_mapping_record += $lic_attr_map_response_details.Item($i)
-    }
+    # $license_attr_mapping_record = @()
+    # for ($i = 0; $i -lt $lic_attr_map_response_details.count; $i++) {
+    #     $license_attr_mapping_record += $lic_attr_map_response_details.Item($i)
+    # }
 
-    $E1_customproperty53_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ('customproperty53' -eq $_.'new_name') }
-    $E1_customproperty53 = $E1_customproperty53_details.new_Value
+    # $E1_customproperty53_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ('customproperty53' -eq $_.'new_name') }
+    # $E1_customproperty53 = $E1_customproperty53_details.new_Value
 
-    $E1_customproperty65_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty65') }
-    $E1_customproperty65 = $E1_customproperty65_details.new_Value
+    # $E1_customproperty65_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty65') }
+    # $E1_customproperty65 = $E1_customproperty65_details.new_Value
 
-    $E1_customproperty63_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty63') }
-    $E1_customproperty63 = $E1_customproperty63_details.new_Value
+    # $E1_customproperty63_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty63') }
+    # $E1_customproperty63 = $E1_customproperty63_details.new_Value
 
-    $E1_attributes65_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'attributes65') }
-    $E1_attributes65 = $E1_attributes65_details.new_Value
+    # $E1_attributes65_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'attributes65') }
+    # $E1_attributes65 = $E1_attributes65_details.new_Value
 
-    $E5_customproperty63_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty63') }
-    $E5_customproperty63 = $E5_customproperty63_details.new_Value
+    # $E5_customproperty63_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty63') }
+    # $E5_customproperty63 = $E5_customproperty63_details.new_Value
 
-    $E5_customproperty53_true_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_true') }
-    $E5_customproperty53_true = $E5_customproperty53_true_details.new_Value
+    # $E5_customproperty53_true_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_true') }
+    # $E5_customproperty53_true = $E5_customproperty53_true_details.new_Value
 
-    $E5_customproperty53_false_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_false') }
-    $E5_customproperty53_false = $E5_customproperty53_false_details.new_Value
-}
-catch {
-    $ex = $_.Exception.Message
-    write-log $ex
-    ScriptError -msg "Failed to get get attribute mapping details from Dataverse`n$($ex.message)"
-}
+    # $E5_customproperty53_false_details = $license_attr_mapping_record | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_false') }
+    # $E5_customproperty53_false = $E5_customproperty53_false_details.new_Value
+# }
+# catch {
+    # $ex = $_.Exception.Message
+    # write-log $ex
+    # ScriptError -msg "Failed to get get attribute mapping details from Dataverse`n$($ex.message)" # This would fail anyway as $DataverseEnvironmentURL is gone.
+# }
 
 # Set azure context to subscription of storage account
 try {
@@ -987,8 +972,8 @@ if ($TestMode) {
     $Saviynt_ClientID = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'SaviyntApi-ClientID' -AsPlainText
     $Saviynt_Secret = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'SaviyntApi-Secret' -AsPlainText
     $SNOW_Oauth_Token = Get-AzKeyVaultSecret -VaultName 'ZSCEVCSP05MGMKVT' -Name 'SNOW-Oauth-Token' -AsPlainText
-    $sqluser   = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'SQL-UserName-Licensingwrite' -asPlainText
-    $sqlpass   = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'SQL-Password-Licensingwrite' -asPlainText
+    $sqluser   = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'SQL-LicensingWrite-UserName' -asPlainText
+    $sqlpass   = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'SQL-LicensingWrite-Password' -asPlainText
 }
 
 try{
@@ -1026,33 +1011,33 @@ foreach ($messageString in $ms365Messages) {
         $SNOW_Oauth_Token = Get-AzKeyVaultSecret -VaultName 'ZSCEVCSP05MGMKVT' -Name 'SNOW-Oauth-Token' -AsPlainText
     }
 
-    #Generating Dataverse token
-    $body = @{
-        grant_type    = 'client_credentials'
-        client_id     = $Dataverse_AppID
-        client_secret = $Dataverse_ClientSecret
-        resource      = $DataverseEnvironmentURL
-    }
+    # Dataverse token generation within loop - REMOVED
+    # $body = @{
+    #     grant_type    = 'client_credentials'
+    #     client_id     = $Dataverse_AppID
+    #     client_secret = $Dataverse_ClientSecret
+    #     resource      = $DataverseEnvironmentURL
+    # }
 
-    try {
-        # Obtain the access token
-        $tokenResponse = Invoke-RestMethod -Uri $tokenEndpoint -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded'
-        $accessToken = $tokenResponse.access_token
-    }
-    catch {
-        $ex = $_.Exception.Message
-        write-log $ex
-        $body
-        ScriptError -msg "Failed to get access token from Dataverse`n$($ex.message)"
-    }
-    # Construct the API request headers with the access token
-    $Dataverseheaders = @{
-        Authorization      = "Bearer $accessToken"
-        'Content-Type'     = 'application/json'
-        'OData-MaxVersion' = '4.0'
-        'OData-Version'    = '4.0'
-        Accept             = 'application/json'
-    }
+    # try {
+    #     # Obtain the access token
+    #     $tokenResponse = Invoke-RestMethod -Uri $tokenEndpoint -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded'
+    #     $accessToken = $tokenResponse.access_token
+    # }
+    # catch {
+    #     $ex = $_.Exception.Message
+    #     write-log $ex
+    #     $body
+    #     ScriptError -msg "Failed to get access token from Dataverse`n$($ex.message)"
+    # }
+    # # Construct the API request headers with the access token
+    # $Dataverseheaders = @{
+    #     Authorization      = "Bearer $accessToken"
+    #     'Content-Type'     = 'application/json'
+    #     'OData-MaxVersion' = '4.0'
+    #     'OData-Version'    = '4.0'
+    #     Accept             = 'application/json'
+    # }
 
     $ID = $messageString.ID
     $Status = $messageString.Status
@@ -1087,27 +1072,27 @@ foreach ($messageString in $ms365Messages) {
         Continue
     }
 
-    #Capture licenseCategorizationID based on category
-    if ($action -eq 'downgrade') {    
-        $licenseCategory = $lic_category_response_details | Where-Object { $_.new_sub_category -eq 'E1' }
-        $licenseCategorizationID = $licenseCategory.crd15_License_CategoryId
-    }
+    # Capture licenseCategorizationID based on category - REMOVED as it depended on Dataverse
+    # if ($action -eq 'downgrade') {    
+    #     # $licenseCategory = $lic_category_response_details | Where-Object { $_.new_sub_category -eq 'E1' } # $lic_category_response_details is removed
+    #     # $licenseCategorizationID = $licenseCategory.crd15_License_CategoryId
+    # }
 
-    if ($action -eq 'upgrade') {
-        switch ($LicenseType) {
-            'Microsoft365' { 
-                $licenseCategory = $lic_category_response_details | Where-Object { $_.new_sub_category -eq 'E5' }
-                $licenseCategorizationID = $licenseCategory.crd15_License_CategoryId
-            }
-            'MicrosoftCopilot' {
-                $licenseCategory = $lic_category_response_details | Where-Object { $_.new_sub_category -eq 'Copilot' }
-                $licenseCategorizationID = $licenseCategory.crd15_License_CategoryId
-            }
-            Default {
-                ScriptError('No valid license type found in the request message.')
-            }
-        }
-    }
+    # if ($action -eq 'upgrade') {
+    #     switch ($LicenseType) {
+    #         'Microsoft365' { 
+    #             # $licenseCategory = $lic_category_response_details | Where-Object { $_.new_sub_category -eq 'E5' } # $lic_category_response_details is removed
+    #             # $licenseCategorizationID = $licenseCategory.crd15_License_CategoryId
+    #         }
+    #         'MicrosoftCopilot' {
+    #             # $licenseCategory = $lic_category_response_details | Where-Object { $_.new_sub_category -eq 'Copilot' } # $lic_category_response_details is removed
+    #             # $licenseCategorizationID = $licenseCategory.crd15_License_CategoryId
+    #         }
+    #         Default {
+    #             ScriptError('No valid license type found in the request message.') # This error is still valid
+    #         }
+    #     }
+    # }
 
     try{
         $UserExists = $null
@@ -1132,42 +1117,11 @@ foreach ($messageString in $ms365Messages) {
                 ScriptError('Failed to update task in snow at User is not valid..')
             }
 
-            Write-Output 'Deleting message from DB and adding to Dataverse...'
-            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Invalid user in Entra' WHERE ID = $id;"
-            
-            # Add Final message to Dataverse
-            $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-
-            try {
-                $bodyContent = @{
-                    new_requestedby                          = $RequestedBy
-                    new_requestedfor                         = $userUPN
-                    'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"
-                    new_action                               = $action
-                    new_requestsource                        = $RequestedSource
-                    new_requesttime                          = $RequestedTime
-                    new_processedtime                        = $ProcessedTime
-                    new_completiontime                       = $completionTime
-                    new_saviynttrackingid                    = $saviyntID
-                    new_status                               = "Completed"
-                    new_saviynttransactionid                 = $saviyntTransactionID
-                    new_errorcode                            = $saviyntExitCode
-                } | ConvertTo-Json
-
-                $DataverseUpdate = Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $bodyContent
-
-                Write-Log 'Message added to Dataverse successfully'
-                Write-Log '#####################################################################'
-                continue
-            }
-            catch {
-                write-log $bodyContent
-                $ex = $_.Exception.Message
-                write-log $ex
-                write-log 'Failed to POST record in the dataverse table License_Category.'
-                Write-Log '#####################################################################'
-                continue
-            }
+            Write-Output 'Updating DB for invalid user...'
+            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Invalid user in Entra' WHERE ID = $ID;" # Changed $id to $ID
+            Write-Log "DB record for ID $ID updated: Invalid user in Entra." -Level 'INFO'
+            Write-Log '#####################################################################'
+            continue # Ensure script continues
         }else{
             ScriptError "Error while getting user details from Entra for validating the user."
         }
@@ -1204,42 +1158,11 @@ foreach ($messageString in $ms365Messages) {
             ScriptError('Failed to update task in snow at User is not enabled..')
         }
 
-        Write-Output 'Deleting message from DB and adding to Dataverse...'
-        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Invalid user in Entra' WHERE ID = $id;"
-            
-        # Add Final message to Dataverse
-        $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-
-        try {
-            $bodyContent = @{
-                new_requestedby                          = $RequestedBy
-                new_requestedfor                         = $userUPN
-                'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"
-                new_action                               = $action
-                new_requestsource                        = $RequestedSource
-                new_requesttime                          = $RequestedTime
-                new_processedtime                        = $ProcessedTime
-                new_completiontime                       = $completionTime
-                new_saviynttrackingid                    = $saviyntID
-                new_status                               = "Completed"
-                new_saviynttransactionid                 = $saviyntTransactionID
-                new_errorcode                            = $saviyntExitCode
-            } | ConvertTo-Json
-
-            $DataverseUpdate = Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $bodyContent
-
-            Write-Log 'Message added to Dataverse successfully'
-            Write-Log '#####################################################################'
-            continue
-        }
-        catch {
-            write-log $bodyContent
-            $ex = $_.Exception.Message
-            write-log $ex
-            write-log 'Failed to POST record in the dataverse table License_Category.'
-            Write-Log '#####################################################################'
-            continue
-        }
+        Write-Output 'Updating DB for disabled user account...'
+        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'User account not enabled in Entra' WHERE ID = $ID;" # Changed $id to $ID and comment
+        Write-Log "DB record for ID $ID updated: User account not enabled in Entra." -Level 'INFO'
+        Write-Log '#####################################################################'
+        continue # Ensure script continues
     }
     
     Write-Log "Checking if the user $userUPN already has requested license ..."
@@ -1312,43 +1235,11 @@ foreach ($messageString in $ms365Messages) {
             ScriptError('Failed to update task in snow at License assigned and replicated..')
         }
 
-        write-log 'Deleting message from DB and adding to Dataverse...'
-        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'License replicated' WHERE ID = $id;"
-
-        Write-Log 'Adding to Dataverse...'
-        # Add Final message to Dataverse
-        $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-
-        try {
-            $bodyContent = @{
-                new_requestedby                          = $RequestedBy
-                new_requestedfor                         = $userUPN
-                'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"
-                new_action                               = $action
-                new_requestsource                        = $RequestedSource
-                new_requesttime                          = $RequestedTime
-                new_processedtime                        = $ProcessedTime
-                new_completiontime                       = $completionTime
-                new_saviynttrackingid                    = $saviyntID
-                new_status                               = if ($SaviyntStatus -eq 'Success') { 'Success' } else { 'Failed' }
-                new_saviynttransactionid                 = $saviyntTransactionID
-                new_errorcode                            = $saviyntExitCode
-            } | ConvertTo-Json
-
-            $DataverseUpdate = Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $bodyContent
-
-            Write-Log 'Message added to Dataverse successfully'
-            Write-Log '#####################################################################'
-            continue
-        }
-        catch {
-            write-log $bodyContent
-            $ex = $_.Exception.Message
-            write-log $ex
-            write-log 'Failed to POST record in the dataverse table License_Category.'
-            Write-Log '#####################################################################'
-            continue
-        }
+        write-log 'Updating DB: License already allocated / replication completed.'
+        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'License replicated' WHERE ID = $ID;" # Changed $id to $ID
+        Write-Log "DB record for ID $ID updated: License replicated." -Level 'INFO'
+        Write-Log '#####################################################################'
+        continue # Ensure script continues
     }
     
     Write-Log "Processing $action for $userUPN"
@@ -1399,23 +1290,21 @@ foreach ($messageString in $ms365Messages) {
                     $snowTicketNumber = "No task for E1"
                 }
 
-                write-log 'DowngradeTo-E1 done. Deleting the existing message, Adding it back to the DB with relavant tracking information...'
+                write-log 'DowngradeTo-E1 Saviynt interaction complete. Updating database record...'
 
                 try {
-                    if ($saviyntRequestReferenceIDs.ExitCode -eq 'Success') {
-                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 2, ProcessedDate = GETUTCDATE(),SaviyntTrackID = '$($saviyntRequestReferenceIDs.trackingID)', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'DowngradeTo-E1 done. Exit code success.' WHERE ID = $id;"
-                        Write-Log "DowngradeTo-E1 done. Exit code success." -Level 'INFO'
+                    $updateComment = "DowngradeTo-E1 Saviynt request processed. Exit code: $($saviyntRequestReferenceIDs.ExitCode)."
+                    if (!([string]::IsNullOrEmpty($snowTicketNumber))) {
+                        $updateComment += " SnowTask: $snowTicketNumber"
                     }
-                    else{
-                        Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 2, ProcessedDate = GETUTCDATE(),SaviyntTrackID = '$saviyntID', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', snowTicketNumber = '$snowTicketNumber', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'DowngradeTo-E1 done. Exit code not success.' WHERE ID = $id;"
-                        Write-Log "DowngradeTo-E1 done. Exit code not success." -Level 'INFO'
-                    }
+                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 2, ProcessedDate = GETUTCDATE(), SaviyntTrackID = '$($saviyntRequestReferenceIDs.trackingID)', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', snowTicketNumber = '$snowTicketNumber', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$updateComment' WHERE ID = $ID;"
+                    Write-Log "DB record for ID $ID updated after DowngradeTo-E1 processing. SaviyntExitCode: $($saviyntRequestReferenceIDs.ExitCode), SnowTicketNumber: $snowTicketNumber" -Level 'INFO'
                     write-log '#####################################################################'
                 }
                 catch {
                     $ex = $_.Exception.Message
-                    write-log $ex
-                    ScriptError('Failed to add new JSON message to the storage queue.')
+                    write-log $ex -Level 'ERROR'
+                    ScriptError("Failed to update DB after DowngradeTo-E1 for ID $ID.") # This will use the updated ScriptError
                 }
             }
             else{
@@ -1451,46 +1340,18 @@ foreach ($messageString in $ms365Messages) {
                             Write-Log 'RITM is not in open state. Skipping the request.'
 
                             try {
-                                Write-Output 'Deleting message from DB and adding to Dataverse...'
-                                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'RITM is not in open state.' WHERE ID = $id;"
-                            }
-                            catch {
-                                $ex = $_.Exception.Message
-                                Write-Log $ex
-                                Write-Log 'Failed to delete message from DB.'
-                            }
-
-                            $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-
-                            try {
-                                $bodyContent = @{
-                                    new_requestedby                          = $RequestedBy
-                                    new_requestedfor                         = $userUPN
-                                    'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"
-                                    new_action                               = $action
-                                    new_requestsource                        = 'DWP-Automation'
-                                    new_requesttime                          = $RequestedTime
-                                    new_processedtime                        = $completionTime
-                                    new_completiontime                       = $completionTime
-                                    new_saviynttrackingid                    = $null
-                                    new_status                               = 'Aborted'
-                                    new_saviynttransactionid                 = $null
-                                    new_errorcode                            = 'RITM already closed'
-                                } | ConvertTo-Json
-
-                                $DataverseUpdate = Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $bodyContent
-
-                                Write-Log 'Message added to Dataverse successfully'
+                                Write-Output 'Updating DB: RITM not in open state.'
+                                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 5, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'RITM is not in open state.' WHERE ID = $ID;" # Changed $id to $ID
+                                Write-Log "DB record for ID $ID updated: RITM not in open state." -Level 'INFO'
                                 Write-Log "#####################################################################"
-                                continue
+                                continue # Ensure script continues
                             }
                             catch {
-                                Write-Log $bodyContent
                                 $ex = $_.Exception.Message
-                                Write-Log $ex
-                                Write-Log 'Failed to POST record in the dataverse table License_queue_request after skipping the request.'
-                                write-log '#####################################################################'
-                                continue
+                                Write-Log $ex -Level 'ERROR'
+                                Write-Log "Failed to update DB for RITM not in open state for ID $ID." -Level 'ERROR'
+                                Write-Log "#####################################################################"
+                                continue # Ensure script continues despite DB update failure in this specific case
                             }
                         }
                     }
@@ -1538,13 +1399,17 @@ foreach ($messageString in $ms365Messages) {
                             $snowTicketNumber = "Error during New-SnowTask"
                         }
 
-                        write-log 'Deleting the existing message, Adding it back to the queue with relavant tracking information...'
+                        write-log 'UpgradeTo-E5 Saviynt interaction complete. Updating database record...'
 
                         try {
+                            $updateComment = "UpgradeTo-E5 Saviynt request processed. Exit code: $($saviyntRequestReferenceIDs.ExitCode)."
+                            if (!([string]::IsNullOrEmpty($snowTicketNumber))) {
+                                $updateComment += " SnowTask: $snowTicketNumber"
+                            }
+                            Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 2, ProcessedDate = GETUTCDATE(), SaviyntTrackID = '$($saviyntRequestReferenceIDs.trackingID)', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', snowTicketNumber = '$snowTicketNumber', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + '$updateComment' WHERE ID = $ID;"
+                            Write-Log "DB record for ID $ID updated after UpgradeTo-E5 processing. SaviyntExitCode: $($saviyntRequestReferenceIDs.ExitCode), SnowTicketNumber: $snowTicketNumber" -Level 'INFO'
+                            
                             if ($saviyntRequestReferenceIDs.ExitCode -eq 'Success') {
-                                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 2, ProcessedDate = GETUTCDATE(),SaviyntTrackID = '$($saviyntRequestReferenceIDs.trackingID)', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'DowngradeTo-E1 done. Exit code success.' WHERE ID = $id;"
-                                Write-Log "DowngradeTo-E1 done. Exit code success. Request updated with Saviynt ID : $($saviyntRequestReferenceIDs.trackingID)." -Level 'INFO'
-
                                 try {
                                     $UpdateTask = Update-TaskStatus -TicketNumber $TaskNumber -State '2' -WorkNotes "Your Microsoft 365 license request has been successfully sent to Saviynt with tracking ID : $($saviyntRequestReferenceIDs.trackingID). It may take up to 6 hours or more for the changes to be reflected. `n `
                                         We appreciate your patience during this time and recommend waiting until the replication is complete. `nIf replication takes longer than expected, please contact the IT Helpdesk and request an update from Saviynt using the tracking ID provided."
@@ -1552,23 +1417,21 @@ foreach ($messageString in $ms365Messages) {
                                 }
                                 catch {
                                     $ex = $_.Exception.Message
-                                    write-log $ex
-                                    ScriptError('Failed to update task in snow at E5 license processed..')
+                                    write-log $ex -Level 'ERROR'
+                                    # Continue even if SNOW task update fails, DB is already updated.
+                                    Write-Log "Failed to update SNOW task $TaskNumber after successful E5 Saviynt processing for ID $ID." -Level 'WARN'
                                 }
                             }
-                            else{
-                                Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 2, ProcessedDate = GETUTCDATE(),SaviyntTrackID = '$saviyntID', SaviyntTransactionID = '$($saviyntRequestReferenceIDs.APITransactionID)', SaviyntExitCode = '$($saviyntRequestReferenceIDs.ExitCode)', snowTicketNumber = '$snowTicketNumber', UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'DowngradeTo-E1 done. Exit code not success.' WHERE ID = $id;"
-                                Write-Log "Request exit code not success." -Level 'INFO'
-
-                                Write-Log "Error : Exit code is not success. Exit code : $($saviyntRequestReferenceIDs.ExitCode) , SNOW Ticket Number : $snowTicketNumber"
+                            else {
+                                # Log if Saviynt ExitCode was not success, but DB update was still attempted.
+                                Write-Log "Saviynt request for UpgradeTo-E5 for ID $ID processed, but ExitCode was not 'Success': $($saviyntRequestReferenceIDs.ExitCode). SnowTicketNumber: $snowTicketNumber" -Level 'WARN'
                             }
                             write-log '#####################################################################'
                         }
                         catch {
-                            Write-Log $newJsonMessage
                             $ex = $_.Exception.Message
-                            write-log $ex
-                            ScriptError('Failed to add new JSON message to the storage queue.')
+                            write-log $ex -Level 'ERROR'
+                            ScriptError("Failed to update DB after UpgradeTo-E5 for ID $ID.") # This will use the updated ScriptError
                         }
                     }
                     else{
@@ -1589,8 +1452,8 @@ foreach ($messageString in $ms365Messages) {
                         Write-Log 'Failed to update ticket to Waiting List.'
                     }
 
-                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 4, ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Licenses at capacity. Processing on hold.' WHERE ID = $id;"
-                    Write-Log "Licenses at capacity. Processing on hold." -Level 'INFO'
+                    Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 4, ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Licenses at capacity. Processing on hold.' WHERE ID = $ID;" # Changed $id to $ID
+                    Write-Log "DB record for ID $ID updated: Licenses at capacity. Processing on hold." -Level 'INFO' # Added log for DB update
 
                     Write-Log '#####################################################################'
                     continue
@@ -1609,15 +1472,15 @@ foreach ($messageString in $ms365Messages) {
                 catch {
                     $ex = $_.Exception.Message
                     write-log $ex
-                    ScriptError('Failed to update task in snow at Invalid license type received..')
+                    ScriptError('Failed to update task in snow at Invalid license type received..') # This will call the modified ScriptError, which updates SQL
                 }
-                write-log "License Type -> $LicenseType is not valid."
+                write-log "License Type -> $LicenseType is not valid." # This log is fine
                 Write-Log '#####################################################################'
-                Continue
+                Continue # This continue is part of the loop, not ScriptError
             }
         }
     }
-    else {
+    else { # This handles invalid $action
         try {
             $UpdateTask = Update-TaskStatus -TicketNumber $TaskNumber -State '4' -WorkNotes 'Invalid action received. Acceptable values are Upgrade or Downgrade. Please raise new request with correct details. Closing the ticket.'
             Write-Log "Task $TaskNumber updated - Invalid action received."
@@ -1625,11 +1488,11 @@ foreach ($messageString in $ms365Messages) {
         catch {
             $ex = $_.Exception.Message
             write-log $ex
-            ScriptError('Failed to update task in snow at Invalid action received.')
+            ScriptError('Failed to update task in snow at Invalid action received.') # This will call the modified ScriptError, which updates SQL
         }
-        write-log "Action -> $action is not valid."
+        write-log "Action -> $action is not valid." # This log is fine
         Write-Log '#####################################################################'
-        Continue
+        Continue # This continue is part of the loop, not ScriptError
     }
 }
 
