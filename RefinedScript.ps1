@@ -224,7 +224,9 @@ Function New-SnowTask {
         # Let's keep the retry but ensure it's robust.
         try {
             Write-Log "Retrying SNOW task creation for $UserUPN" -Level 'INFO'
-            (Invoke-RestMethod @params -ErrorAction Stop).result.number # Retry with the same params
+            $taskResult = (Invoke-RestMethod @params -ErrorAction Stop).result.number # Retry with the same params
+            Write-Log "New-SnowTask: Successfully created SNOW task '$taskResult' on retry for User: $UserUPN." -Level 'INFO'
+            return $taskResult
         }
         catch {
             $exMsgRetry = $_.Exception.Message
@@ -261,19 +263,40 @@ function Convert-ToDateTime {
 function Get-MSFormToken {
     # $KeyvaultName is global or passed as param. Assuming global for now.
     $scope = 'https://forms.cloud.microsoft/.default'
-    $refreshtoken = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'api-dwp-graph-refreshToken' -AsPlainText # Make sure $KeyvaultName is correctly set (e.g. 'zne-dwp-p-kvl')
-    $clientId = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'DWP-DevHub-Dataverse-AppID' -AsPlainText
+    $refreshTokenName = 'api-dwp-graph-refreshToken'
+    $clientIdName = 'DWP-DevHub-Dataverse-AppID'
     $tenantid = 'ea80952e-a476-42d4-aaf4-5457852b0f7e'
+    $refreshtoken = $null
+    $clientId = $null
+
+    try {
+        $refreshtoken = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name $refreshTokenName -AsPlainText
+        $clientId = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name $clientIdName -AsPlainText
+    }
+    catch {
+        $failedSecretName = if (-not $refreshtoken) { $refreshTokenName } else { $clientIdName }
+        Write-Log "Failed to retrieve KeyVault secret '$failedSecretName' from vault '$KeyvaultName'. Error: $($_.Exception.Message)" -Level 'ERROR'
+        throw "Failed to retrieve KeyVault secret for MS Form Token generation."
+    }
 
     $body = @{
         client_id     = $clientId
         scope         = $scope
         grant_type    = 'refresh_token'
-        refresh_token = $refreshToken
+        refresh_token = $refreshtoken # Corrected variable name
     }
-    $response = Invoke-WebRequest "https://login.microsoftonline.com/$tenantid/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Method POST -Body $body
-    $tokenobj = ConvertFrom-Json $response.Content
-    return $tokenobj.access_token
+    $tokenUri = "https://login.microsoftonline.com/$tenantid/oauth2/v2.0/token"
+    try {
+        $response = Invoke-WebRequest $tokenUri -ContentType 'application/x-www-form-urlencoded' -Method POST -Body $body
+        $tokenobj = ConvertFrom-Json $response.Content
+        return $tokenobj.access_token
+    }
+    catch {
+        # Sanitize body for logging by removing refresh_token
+        $sanitizedBody = $body | Select-Object * -ExcludeProperty refresh_token | ConvertTo-Json -Compress
+        Write-Log "Failed to retrieve MS Form token from identity provider. URI: $tokenUri. Body (sanitized): $sanitizedBody. Error: $($_.Exception.Message)" -Level 'ERROR'
+        throw "Failed to retrieve MS Form token from identity provider."
+    }
 }
 
 function Get-MSFormResponse {
@@ -299,7 +322,15 @@ function Get-MSFormResponse {
         'Authorization' = "Bearer $MSFormToken"
     }
     $formResponsesUrl = "https://forms.office.com/formapi/api/$TenantId/users/$UserID/forms('$formId')/responses"
-    $response = Invoke-RestMethod -Uri $formResponsesUrl -Headers $headers -Method Get
+    $response = $null
+    try {
+        $response = Invoke-RestMethod -Uri $formResponsesUrl -Headers $Headers -Method Get -ErrorAction Stop
+    }
+    catch {
+        Write-Log "Failed to retrieve MS Form responses for user '$UserUPN' from URL '$formResponsesUrl'. Error: $($_.Exception.Message)" -Level 'ERROR'
+        ScriptError -msg "Failed to retrieve MS Form responses for user $UserUPN." -UserUPNForError $UserUPN
+        return "Error_Fetching_Responses"
+    }
 
     $ResponseObject = $response.value | Where-Object { $_.responder -eq $userUPN }
 
@@ -309,14 +340,21 @@ function Get-MSFormResponse {
     else {
         # $Responder = $responseObject.responder # Not used
         # $ResponseDate = $responseObject.submitDate # Not used
-        $Answer = ($responseObject.answers | ConvertFrom-Json).answer1
-        return $Answer
+        try {
+            $Answer = ($ResponseObject.answers | ConvertFrom-Json).answer1
+            return $Answer
+        }
+        catch {
+            Write-Log "Failed to parse MS Form answer for user '$UserUPN' from response. Error: $($_.Exception.Message)" -Level 'ERROR'
+            ScriptError -msg "Failed to parse MS Form answer for user $UserUPN." -UserUPNForError $UserUPN
+            return "Error_Parsing_Answer"
+        }
     }
 }
 
 function Get-SOUCornerstoneReport{
-    $azcontext = Set-AzContext -Subscription $StorageAccountSubscription
     try {
+        $azcontext = Set-AzContext -Subscription $StorageAccountSubscription
         $storageAccount = Get-AzStorageAccount -ResourceGroupName $StorageAccountNameRSG -Name $storageAccountName -DefaultProfile $azcontext
         $storageAccountContext = $storageAccount.Context
     }
@@ -333,8 +371,15 @@ function Get-SOUCornerstoneReport{
     $containerNameSouReport = 'copilot-sou-report-cornerstone' # Specific container for SOU reports
     $PrivateKeyFile = 'copilot_prod_SECRET.asc'
 
-    if (!(Test-Path $destinationFilePath)) {
-        New-Item -ItemType Directory -Force -Path $destinationFilePath
+    try {
+        if (!(Test-Path $destinationFilePath)) {
+            New-Item -ItemType Directory -Force -Path $destinationFilePath
+        }
+    }
+    catch {
+        Write-Log "$_.Exception.Message" -Level 'ERROR'
+        ScriptError -msg "Failed to create destination directory '$destinationFilePath'."
+        return
     }
 
     # $passphraseFilePath = $destinationFilePath + '' + $secretFileName # Original, fixed below
@@ -409,6 +454,7 @@ function Get-SOUCornerstoneReport{
                 throw "GPG decryption failed: $ex_ic" 
             }
         }
+        # The if ($LASTEXITCODE -ne 0) check for gpg.exe is kept as it's a direct check of an external command's success.
         if ($LASTEXITCODE -ne 0) {
              ScriptError "GPG Decryption failed. Exit code: $LASTEXITCODE. Check logs for details."
              return
@@ -464,9 +510,25 @@ function Get-SOUStatus {
     }
     
     $csvData = $csvContent | Select-Object -Skip 7
-    $csvParsed = $csvData | ConvertFrom-Csv
+    $csvParsed = $null
+    try {
+        $csvParsed = $csvData | ConvertFrom-Csv
+    }
+    catch {
+        Write-Log "Failed to parse SOU CSV data. User: $UserUPN. Error: $($_.Exception.Message)" -Level 'ERROR'
+        ScriptError -msg "Failed to parse SOU CSV data for user $UserUPN." -UserUPNForError $UserUPN
+        return "Error"
+    }
 
-    $selectedData = $csvParsed | Select-Object 'Training title', 'User full name', 'User e-mail', 'Quiz attempt date', 'Quiz SUCCESS Status', 'Training record status', 'Training record completed date'
+    $selectedData = $null
+    try {
+        $selectedData = $csvParsed | Select-Object 'Training title', 'User full name', 'User e-mail', 'Quiz attempt date', 'Quiz SUCCESS Status', 'Training record status', 'Training record completed date'
+    }
+    catch {
+        Write-Log "SOU CSV missing expected columns or error during column selection. User: $UserUPN. Error: $($_.Exception.Message)" -Level 'ERROR'
+        ScriptError -msg "SOU CSV missing expected columns for user $UserUPN." -UserUPNForError $UserUPN
+        return "Error"
+    }
     $today = (Get-Date)
     $TwentyEightDaysAgo = (Get-Date).AddDays(-28)
     $365DaysAgo = (Get-Date).AddDays(-365)
@@ -494,9 +556,15 @@ function Get-SOUStatus {
             Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Training expired' WHERE ID = $DBMessageID;"
             Write-Log "DB record $DBMessageID for UPN $userUPN - $LicenseType $Action marked as Training Expired."
 
-            Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the task.'
-            Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the ticket.'
-            Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Training Expired'
+            try {
+                Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the task.'
+            } catch { Write-Log "Failed to update Task $CurrentTaskNumber for user $UserUPN (Context: Training Expired). Error: $($_.Exception.Message)" -Level 'WARN' }
+            try {
+                Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the ticket.'
+            } catch { Write-Log "Failed to update RITM $CurrentRITMNumber for user $UserUPN (Context: Training Expired). Error: $($_.Exception.Message)" -Level 'WARN' }
+            try {
+                Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Training Expired'
+            } catch { Write-Log "Failed to update entity quota for user $UserUPN (Entity: $UserExtensionAttribute1FromContext, Context: Training Expired). Error: $($_.Exception.Message)" -Level 'WARN' }
 
             $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
             $dataverseBody = @{
@@ -514,12 +582,20 @@ function Get-SOUStatus {
                 if($null -ne $UserPTWData){
                     if(($UserPTWData.'Training record status' -notcontains 'Completed') -and ($UserSOUData.'Training record status' -eq 'Completed')){
                         Write-Log "User $UserUPN (T&S) has completed SOU but PTW training is not completed. Rejecting." -Level WARN
-                        Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot license request rejected' -StorageAccountName $StorageAccountName -ContainerName $ContainerName -TemplateName 'Microsft_365_copilot_ST&S_PTW_Pending.html' -Replacements @{}
+                        try {
+                            Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot license request rejected' -StorageAccountName $StorageAccountName -ContainerName $ContainerName -TemplateName 'Microsft_365_copilot_ST&S_PTW_Pending.html' -Replacements @{}
+                        } catch { Write-Log "Failed to send Copilot email (Template: Microsft_365_copilot_ST&S_PTW_Pending.html) to user $UserUPN. Error: $($_.Exception.Message)" -Level 'WARN' }
                         
                         Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Rejected due to PTW non-completion' WHERE ID = $DBMessageID;"
-                        Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected."
-                        Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected' or similar
-                        Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected' # Use 'Rejected' stage
+                        try {
+                            Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected."
+                        } catch { Write-Log "Failed to update Task $CurrentTaskNumber for user $UserUPN (Context: PTW Non-Completion). Error: $($_.Exception.Message)" -Level 'WARN' }
+                        try {
+                            Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected' or similar
+                        } catch { Write-Log "Failed to update RITM $CurrentRITMNumber for user $UserUPN (Context: PTW Non-Completion). Error: $($_.Exception.Message)" -Level 'WARN' }
+                        try {
+                            Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected' # Use 'Rejected' stage
+                        } catch { Write-Log "Failed to update entity quota for user $UserUPN (Entity: $UserExtensionAttribute1FromContext, Context: PTW Non-Completion). Error: $($_.Exception.Message)" -Level 'WARN' }
 
                         $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
                         $dataverseBody = @{
@@ -536,11 +612,19 @@ function Get-SOUStatus {
                      if ($UserSOUData.'Training record status' -eq 'Completed') { # SOU is completed but PTW is missing
                         Write-Log "User $UserUPN (T&S) has completed SOU but no PTW training data found. Assuming PTW incomplete and rejecting." -Level WARN
                         # Similar rejection logic as above for PTW not completed
-                        Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot license request rejected' -StorageAccountName $StorageAccountName -ContainerName $ContainerName -TemplateName 'Microsft_365_copilot_ST&S_PTW_Pending.html' -Replacements @{}
+                        try {
+                            Send-CopilotEmail -SendTo $userUPN -CC 'ITRequest@bp.com' -EmailSubject 'Copilot license request rejected' -StorageAccountName $StorageAccountName -ContainerName $ContainerName -TemplateName 'Microsft_365_copilot_ST&S_PTW_Pending.html' -Replacements @{}
+                        } catch { Write-Log "Failed to send Copilot email (Template: Microsft_365_copilot_ST&S_PTW_Pending.html) to user $UserUPN. Error: $($_.Exception.Message)" -Level 'WARN' }
                         Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 7, CompletionDate=GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'Rejected due to missing PTW data' WHERE ID = $DBMessageID;"
-                        Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected."
-                        Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected'
-                        Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected'
+                        try {
+                            Update-TaskStatus -TicketNumber $CurrentTaskNumber -State '3' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected."
+                        } catch { Write-Log "Failed to update Task $CurrentTaskNumber for user $UserUPN (Context: PTW Missing Data). Error: $($_.Exception.Message)" -Level 'WARN' }
+                        try {
+                            Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected'
+                        } catch { Write-Log "Failed to update RITM $CurrentRITMNumber for user $UserUPN (Context: PTW Missing Data). Error: $($_.Exception.Message)" -Level 'WARN' }
+                        try {
+                            Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected'
+                        } catch { Write-Log "Failed to update entity quota for user $UserUPN (Entity: $UserExtensionAttribute1FromContext, Context: PTW Missing Data). Error: $($_.Exception.Message)" -Level 'WARN' }
 
                         $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
                         $dataverseBody = @{
@@ -606,6 +690,13 @@ function Get-TOUStatus { # This function is specific to Copilot.ps1 logic for no
         ScriptError("Failed to get MS Form response for TOU status for user $UserUPN.")
         return "Error"
     }
+
+    if ($FormResponseValue -eq "Error" -or $FormResponseValue -eq "Error_Fetching_Responses" -or $FormResponseValue -eq "Error_Parsing_Answer") {
+        # ScriptError would have been called by Get-MSFormResponse or this function's catch block already.
+        # Just ensure we propagate an error status.
+        return "Error"
+    }
+
     switch ($FormResponseValue) {
         'Accept'  { return 'Passed' }
         'Decline' { return 'Failed' }
