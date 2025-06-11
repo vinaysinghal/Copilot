@@ -134,43 +134,13 @@ Function ScriptError {
         
         $ticket = New-SnowTask -shortDescription $ShortDesc -Description $response -UserUPN $UserUPNForError -cmdb_ci $cmdbCiForTask
         Write-Log "SNOW ticket logged: $ticket" -Level 'ERROR'
-        $SnowTaskTicketNumber = $ticket # Store for Dataverse logging
     }
     catch {
         $ex = $_.Exception.Message
         Write-Log "Failed to create SNOW Task: $ex" -Level 'ERROR'
     }
 
-    # Add Error message to Dataverse
-    try {
-        $completionTimeError = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-        $bodyContent = @{
-            new_requestedby                          = $RequestedByForError
-            new_requestedfor                         = $UserUPNForError
-            'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationIDForError)"
-            new_action                               = $actionForError
-            new_requestsource                        = 'DWP-Automation'
-            new_requesttime                          = $RequestedTimeForError
-            new_processedtime                        = $ProcessedTimeForError
-            new_completiontime                       = $completionTimeError
-            new_lappcasenumber                       = $LAppCaseForError
-            new_saviynttrackingid                    = $saviyntRequestReferenceIDsForError.trackingID
-            new_status                               = "Error" 
-            new_saviynttransactionid                 = $saviyntRequestReferenceIDsForError.APITransactionID
-            new_errorcode                            = $msg
-            new_snowtasknumber                       = $SnowTaskTicketNumber # Added this field
-        } | ConvertTo-Json
-
-        $DataverseUpdate = Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $bodyContent
-        Write-Log 'Error message added to Dataverse successfully' -Level 'INFO'
-    }
-    catch {
-        Write-Log "Dataverse body content for error: $bodyContent" -Level 'ERROR'
-        $ex = $_.Exception.Message
-        Write-Log "Failed to POST error record to Dataverse: $ex" -Level 'VERBOSE'
-        Write-Log 'Failed to POST record in the dataverse table License_queue_request during scriptError.' -Level 'ERROR'
-    }
-    return # Copilot.ps1 had return, E1-E5.ps1 had continue. Standardizing to return from function, caller decides flow.
+    return
 }
 
 Function New-SnowTask {
@@ -537,7 +507,7 @@ function Get-SOUStatus {
         $trainingCompletedDate = $TrainingCompletedString -split ' ' | Select-Object -First 1
         $parsedDate = $null
         try { $parsedDate = Convert-ToDateTime($trainingCompletedDate) } catch { Write-Log "Could not parse date: $trainingCompletedDate for user $_.'User e-mail'" -Level WARN }
-        $parsedDate -ne $null -and $parsedDate -ge $365DaysAgo -and $parsedDate -le $today
+        $null -ne $parsedDate -and $parsedDate -ge $365DaysAgo -and $parsedDate -le $today
     }
 
     $UserSOUData = $filteredData | Where-Object { ($_.'User e-mail' -eq $UserUPN) -and ($_.'Training title' -like '*Copilot for Microsoft 365*') } | Select-Object -Unique
@@ -561,15 +531,6 @@ function Get-SOUStatus {
             Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes 'Training assignment date is older than 28 days. Training has expired. Closing the ticket.'
             Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Training Expired'
 
-            $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-            $dataverseBody = @{
-                new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedTime; new_completiontime = $completionTime
-                new_lappcasenumber = $LAppCase; new_saviynttrackingid = $saviyntRequestReferenceIDs.trackingID; new_status = 'Complete'; new_saviynttransactionid = $saviyntRequestReferenceIDs.APITransactionID
-                new_errorcode = 'Training Expired'
-            } | ConvertTo-Json
-            Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dataverseBody
-            Write-Log "Dataverse record updated for $userUPN due to training expiry."
             return "Expired" # Special status to indicate processing should stop for this user
         } else {
              # Check PTW for T&S only if LAppCaseAssignedDate is NOT older than 28 days
@@ -590,15 +551,6 @@ function Get-SOUStatus {
                         Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training record shows as incomplete. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected' or similar
                         Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected' # Use 'Rejected' stage
 
-                        $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-                        $dataverseBody = @{
-                            new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                            new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedTime; new_completiontime = $completionTime
-                            new_lappcasenumber = $LAppCase; new_saviynttrackingid = $saviyntRequestReferenceIDs.trackingID; new_status = 'Complete'; new_saviynttransactionid = $saviyntRequestReferenceIDs.APITransactionID
-                            new_errorcode = 'PTW Training incomplete'
-                        } | ConvertTo-Json
-                        Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dataverseBody
-                        Write-Log "Dataverse record updated for $userUPN due to PTW incomplete."
                         return "PTW_Failed" # Special status
                     }
                 } else { # No PTW data found for T&S user
@@ -617,15 +569,6 @@ function Get-SOUStatus {
                         Update-TicketStatus -TicketNumber $CurrentRITMNumber -State '3' -Stage 'Training Expired' -WorkNotes "User's Passport To Work training data not found. Microsoft 365 Copilot license request rejected." # Stage should be 'Rejected'
                         Update-EntityQuota -UserEntity $UserExtensionAttribute1FromContext -TicketStage 'Rejected'
 
-                        $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-                        $dataverseBody = @{
-                            new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                            new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedTime; new_completiontime = $completionTime
-                            new_lappcasenumber = $LAppCase; new_saviynttrackingid = $saviyntRequestReferenceIDs.trackingID; new_status = 'Complete'; new_saviynttransactionid = $saviyntRequestReferenceIDs.APITransactionID
-                            new_errorcode = 'PTW Training data missing'
-                        } | ConvertTo-Json
-                        Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dataverseBody
-                        Write-Log "Dataverse record updated for $userUPN due to missing PTW data."
                         return "PTW_Missing"
                      }
                 }
@@ -729,7 +672,7 @@ function Invoke-UpgradeToCopilot {
         }
         catch {
             $ex = $_.Exception.Message
-            Write-Log "Failed to add user $UserUPN to Copilot Completed Group $CopilotCompletedGroupID: $ex" -Level 'ERROR'
+            Write-Log "Failed to add user $UserUPN to Copilot Completed Group $CopilotCompletedGroupID : $ex" -Level 'ERROR'
             # ScriptError('Failed to add user to Copilot Completed Group.') # Let caller handle flow
             $LicenseAssignmentStatus = "ErrorAddingToGroup"
         }
@@ -765,15 +708,6 @@ function Invoke-UpgradeToCopilot {
         }
         Update-EntityQuota -UserEntity $UserExtensionAttribute1ForQuota -TicketStage 'Rejected' # Or 'Training Failed'
 
-        $completionTime = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-        $dvBody = @{
-            new_requestedby = $RequestedByForDV; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationIDForDV)"; new_action = $actionForDV
-            new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTimeForDV; new_processedtime = $ProcessedTimeForDV; new_completiontime = $completionTime
-            new_lappcasenumber = $LAppCaseFromContext; new_saviynttrackingid = $null; new_status = 'Complete'; new_saviynttransactionid = $null # Assuming no Saviynt for Copilot
-            new_errorcode = 'SOU/TOU Failed'
-        } | ConvertTo-Json
-        Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBody
-        Write-Log "Dataverse record updated for $userUPN due to SOU/TOU failure."
         $LicenseAssignmentStatus = 'Failed' # This will make the main loop continue for this message after cleanup
     } else {
         Write-Log "Invoke-UpgradeToCopilot called with unexpected SOU/TOU status: '$SOUTrainingStatusToUse' for user $UserUPN." -Level ERROR
@@ -796,7 +730,7 @@ function Get-SaviyntLicenseReplicationStatus { # Combined from E1-E5.ps1 (more c
     }
     catch {
         $ex = $_.Exception.Message
-        Write-Log "Error getting license details for $emailID: $ex" -Level 'ERROR'
+        Write-Log "Error getting license details for $emailID : $ex" -Level 'ERROR'
         # ScriptError("Failed to get allocated license details for the user $emailID.") # Let caller handle
         return $false # Assume not replicated on error
     }
@@ -1235,7 +1169,7 @@ function Invoke-UpgradeToE5 {
     try { $result = Invoke-RestMethod @paramsUserLookup -ErrorAction Stop }
     catch { Write-Log "Saviynt user lookup for $UserUPNForE5 failed: $($_.Exception.Message)" -Level ERROR; ScriptError -msg "Saviynt user lookup failed." -UserUPNForError $UserUPNForE5; return }
 
-    Write-Log "Saviynt user lookup attributes for $UserUPNForE5: $($result.attributes | ConvertTo-Json -Depth 3)" -Level DEBUG
+    Write-Log "Saviynt user lookup attributes for $UserUPNForE5 : $($result.attributes | ConvertTo-Json -Depth 3)" -Level DEBUG
     $BPIdentityAPITransactionID = (New-Guid).Guid -replace '-[a-f|0-9]{12}$'
     $ExceptionErrorCode = "GenericError" # Default
 
@@ -1243,7 +1177,7 @@ function Invoke-UpgradeToE5 {
         Write-Log "Saviynt record found for user $UserUPNForE5." -Level INFO
         $saviyntUserSystemName = $result.attributes.systemUserName.value
 
-        # Check current Saviynt attributes against target E5 attributes (from Dataverse config)
+        # Check current Saviynt attributes against target E5 attributes 
         if ((($result.attributes.customproperty65.value).ToLower() -eq $E1_attributes65.ToLower()) -or (($result.attributes.customproperty65.value).ToLower() -eq $E1_customproperty65.ToLower())) {
             if ((($result.attributes.customproperty53.value).ToLower() -eq $E5_customproperty53_false.ToLower()) -or (!$result.attributes.customproperty53.value) -or (($result.attributes.customproperty63.value).ToLower() -ne $E5_customproperty63.ToLower())) {
                 Write-Log "User $UserUPNForE5 does not have E5 attributes in Saviynt. Requesting E5 uplift." -Level INFO
@@ -1377,7 +1311,7 @@ function Get-LicenseAllocationStatus { # From E1-E5.ps1 - Pre-check if user *alr
     try {
         $licenses = Get-MgUserLicenseDetail -UserId $emailID
     } catch {
-        Write-Log "Get-LicenseAllocationStatus: Error getting licenses for $emailID: $($_.Exception.Message)" -Level WARN
+        Write-Log "Get-LicenseAllocationStatus: Error getting licenses for $emailID : $($_.Exception.Message)" -Level WARN
         return $false # Cannot confirm, assume not allocated
     }
 
@@ -1429,7 +1363,7 @@ function Get-SnowAccessToken {
         }
     } catch {
         $ex = $_.Exception.Message
-        $errorDetails = "URI: $tokenUri. Body (secrets redacted for log): $(@{$tokenBody | Select-Object * -ExcludeProperty Client_Secret} | ConvertTo-Json -Compress)"
+        $errorDetails = "URI: $tokenUri. Body (secrets redacted for log): $(@($tokenBody | Select-Object * -ExcludeProperty Client_Secret) | ConvertTo-Json -Compress)"
         Write-Log "Failed to get SNOW Access Token: $ex. $errorDetails" -Level ERROR
         throw "SNOW Access Token generation failed: $ex" # Re-throw to allow caller to handle critical failure
     }
@@ -1475,13 +1409,8 @@ switch ($AutomationAccountName) {
         $CopilotEmailTemplateContainer = 'copilot-license-allocation-email-templates' # Copilot Send-Email
         $SouReportContainer = 'copilot-sou-report-cornerstone' # Get-SOUCornerstoneReport
         
-        # Dataverse
-        $DataverseEnvironmentURL = 'https://orga8dae9a2.crm4.dynamics.com'
         $KeyvaultName = 'zne-dwp-n-kvl' # Primary KeyVault for this env
-        $Copilot_GUID = '58586b15-2e27-ef11-840a-000d3ab44827' # Dataverse License_Category GUID
-        $E1_GUID = '135f4d11-300d-ef11-9f8a-6045bd8865c3'      # Dataverse License_Category GUID
-        $E5_GUID = 'db56a5c3-250d-ef11-9f89-000d3a222c58'      # Dataverse License_Category GUID
-
+        
         # SNOW
         $SnowURL = 'https://bpdev.service-now.com' # E1-E5 was bptest, Copilot was bpdev. Standardizing to bpdev for NonProd.
         # $SNOW_Oauth_Token_KV_Name = 'SNOW-Oauth-Token-Test' # Copilot used ZSCEVCSP05MGMKVT vault, E1-E5 used Get-SnowAccessToken
@@ -1532,11 +1461,7 @@ switch ($AutomationAccountName) {
         $CopilotEmailTemplateContainer = 'copilot-license-allocation-email-templates'
         $SouReportContainer = 'copilot-sou-report-cornerstone' # Prod SOU report container
 
-        $DataverseEnvironmentURL = 'https://orgee396095.crm4.dynamics.com'
         $KeyvaultName = 'zne-dwp-p-kvl'
-        $Copilot_GUID = '58586b15-2e27-ef11-840a-000d3ab44827' # Prod GUID
-        $E1_GUID = '52bf2013-2e27-ef11-840a-000d3a660d83'      # Prod GUID
-        $E5_GUID = '54586b15-2e27-ef11-840a-000d3ab44827'      # Prod GUID
 
         $SnowURL = 'https://bp.service-now.com'
         $SNOW_Oauth_Token_KV_Name = 'SNOW-Oauth-Token' # Direct Token for Prod from ZSCEVCSP05MGMKVT
@@ -1579,11 +1504,18 @@ switch ($AutomationAccountName) {
 }
 if ($TestMode) { Write-Output "TESTMODE ENABLED via AutomationAccountName: $AutomationAccountName" }
 
+$E1_customproperty53 = "True"
+$E1_customproperty65 = "3rdPartyMailbox"
+$E1_customproperty63 = "non-bp"
+$E1_attributes65 = "RemoteUserMailbox"
+
+$E5_customproperty63 = "win10"
+$E5_customproperty53_true = "True"
+$E5_customproperty53_false = "False"
+
 # Fetch secrets from KeyVault based on environment
 try {
     Set-AzContext -Subscription $StorageAccountSubscription -ErrorAction Stop # Set context for KV access if needed, or rely on Connect-AzAccount's default
-    $Dataverse_AppID = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'DWP-DevHub-Dataverse-AppID' -AsPlainText
-    $Dataverse_ClientSecret = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name 'DWP-DevHub-Dataverse-ClientSecret' -AsPlainText
     $sqluser = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name $sqluser_KV_Name -AsPlainText
     $sqlpass = Get-AzKeyVaultSecret -VaultName $KeyvaultName -Name $sqlpass_KV_Name -AsPlainText
 
@@ -1644,37 +1576,6 @@ catch {
     ScriptError -msg "Failed to get critical secrets from KeyVault '$KeyvaultName': $ex" # No user context here
     exit
 }
-
-# Dataverse Authentication
-Write-Log "Attempting to retrieve Dataverse access token for AppID '$Dataverse_AppID'." -Level 'DEBUG'
-$tokenBodyDV = @{ grant_type = 'client_credentials'; client_id = $Dataverse_AppID; client_secret = $Dataverse_ClientSecret; resource = $DataverseEnvironmentURL }
-try {
-    $tokenResponseDV = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$tenantId/oauth2/token" -Method Post -Body $tokenBodyDV -ContentType 'application/x-www-form-urlencoded'
-    $accessTokenDV = $tokenResponseDV.access_token
-    Write-Log "Successfully retrieved Dataverse access token." -Level 'DEBUG'
-}
-catch { $ex = $_.Exception.Message; ScriptError -msg "Failed to get Dataverse access token: $ex"; exit } # No user context here
-
-$Dataverseheaders = @{ Authorization = "Bearer $accessTokenDV"; 'Content-Type' = 'application/json'; 'OData-MaxVersion' = '4.0'; 'OData-Version' = '4.0'; Accept = 'application/json' }
-$lic_category_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/crd15_license_categories"
-$lic_attr_map_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/new_license_attribute_mappings"
-$lic_queue_apiUrl = "$DataverseEnvironmentURL/api/data/v9.2/new_license_queue_requests"
-
-try {
-    $lic_category_response_details = (Invoke-RestMethod -Uri $lic_category_apiUrl -Headers $Dataverseheaders -Method Get).value
-    
-    # E1-E5 specific Dataverse attribute mappings
-    $lic_attr_map_response_details_all = (Invoke-RestMethod -Uri $lic_attr_map_apiUrl -Headers $Dataverseheaders -Method Get).value
-    $E1_customproperty53 = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty53') }).new_Value
-    $E1_customproperty65 = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty65') }).new_Value
-    $E1_customproperty63 = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'customproperty63') }).new_Value
-    $E1_attributes65 = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E1_GUID) -and ($_.new_name -eq 'attributes65') }).new_Value
-    $E5_customproperty63 = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty63') }).new_Value
-    $E5_customproperty53_true = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_true') }).new_Value
-    $E5_customproperty53_false = ($lic_attr_map_response_details_all | Where-Object { ($_.'_new_licensecategorizationid_value' -eq $E5_GUID) -and ($_.new_name -eq 'customproperty53_false') }).new_Value
-}
-catch { $ex = $_.Exception.Message; ScriptError -msg "Failed to get Dataverse config (categories/attributes): $ex"; exit } # No user context here
-
 
 # Fetch all messages from DB
 try {
@@ -1750,30 +1651,6 @@ foreach ($messageString in $dbmessagesAll) {
 
     Write-Log "Processing UPN: $userUPN, LicenseType: $LicenseType, Action: $action, RITM: $RITMNumber, Task: $TaskNumber, DB_ID: $ID" -Level 'INFO'
 
-    # Determine License Categorization ID for Dataverse logging
-    $licenseCategorizationID = $null
-    if ($action -eq 'downgrade') { # E1
-        $licenseCategorizationID = ($lic_category_response_details | Where-Object { $_.new_sub_category -eq 'E1' -and $_._new_parentcategoryid_value -ne $null }).crd15_License_CategoryId # Assuming E1 is a sub-category
-        if(-not $licenseCategorizationID) { $licenseCategorizationID = $E1_GUID } # Fallback to direct GUID
-    } elseif ($action -eq 'upgrade') {
-        if ($LicenseType -eq 'Microsoft365') { # E5
-            $licenseCategorizationID = ($lic_category_response_details | Where-Object { $_.new_sub_category -eq 'E5' -and $_._new_parentcategoryid_value -ne $null }).crd15_License_CategoryId
-            if(-not $licenseCategorizationID) { $licenseCategorizationID = $E5_GUID }
-        } elseif ($LicenseType -eq 'MicrosoftCopilot') {
-            $licenseCategorizationID = ($lic_category_response_details | Where-Object { $_.new_sub_category -eq 'Copilot' -and $_._new_parentcategoryid_value -ne $null }).crd15_License_CategoryId
-            if(-not $licenseCategorizationID) { $licenseCategorizationID = $Copilot_GUID }
-        }
-    }
-    if (-not $licenseCategorizationID) {
-        Write-Log "Could not determine License Categorization ID for $LicenseType ($action). Using a placeholder if available or logging might fail." -Level WARN
-        # Attempt to find a generic one or use a known default if critical
-        if ($LicenseType -eq 'MicrosoftCopilot') {$licenseCategorizationID = $Copilot_GUID}
-        elseif ($LicenseType -eq 'Microsoft365' -and $action -eq 'upgrade') {$licenseCategorizationID = $E5_GUID}
-        elseif ($LicenseType -eq 'Microsoft365' -and $action -eq 'downgrade') {$licenseCategorizationID = $E1_GUID}
-        else { Write-Log "FATAL: Unknown license categorization for $LicenseType and $action." -Level ERROR; continue}
-    }
-
-
     # Basic User Validation (common pre-check)
     $UserExists = $null; $UserEnabled = $false
     try {
@@ -1790,7 +1667,7 @@ foreach ($messageString in $dbmessagesAll) {
                 $sqlExMsg = $_.Exception.Message
                 ScriptError -msg "SQL update failed for 'User Not Found in Entra' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             }
-            # Dataverse Log for not found user (simplified ScriptError call)
+            # Log for not found user (simplified ScriptError call)
             ScriptError -msg "User $userUPN not found in Entra." -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             Update-TaskStatus -TicketNumber $TaskNumber -State '9' -WorkNotes "User $userUPN not found in Entra. Request cancelled." # E1E5 logic
             continue
@@ -1826,14 +1703,6 @@ foreach ($messageString in $dbmessagesAll) {
                     $sqlExMsg = $_.Exception.Message
                     ScriptError -msg "SQL update failed for 'RITM Already Closed' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
                 }
-                # Dataverse log for RITM closed
-                $completionTimeClosedRitm = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-                $dvBodyClosedRitm = @{
-                    new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                    new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeClosedRitm
-                    new_lappcasenumber = $LAppCase; new_status = 'Aborted'; new_errorcode = 'RITM already closed'
-                } | ConvertTo-Json
-                Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyClosedRitm
                 continue
             }
         } else {
@@ -1869,14 +1738,6 @@ foreach ($messageString in $dbmessagesAll) {
                 $sqlExMsg = $_.Exception.Message
                 ScriptError -msg "SQL update failed for 'User Already Has Copilot License' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             }
-            # Dataverse log for already licensed
-            $completionTimeAlreadyLicensed = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-            $dvBodyAlreadyLicensed = @{
-                new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeAlreadyLicensed
-                new_status = 'Completed'; new_errorcode = 'Already licensed (Copilot)'
-            } | ConvertTo-Json
-            Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyAlreadyLicensed
             continue
         }
         
@@ -1923,7 +1784,7 @@ foreach ($messageString in $dbmessagesAll) {
                     } else {
                         $LAppCase = $LAppCaseNumberFromSF
                     }
-                    Write-Log "LApp Case for $userUPN: $LAppCase. Updating DB and SNOW." -Level INFO
+                    Write-Log "LApp Case for $userUPN : $LAppCase. Updating DB and SNOW." -Level INFO
                     try {
                         Invoke-Sqlquery -qry "UPDATE Licensing_Dev.License_Requests SET StatusID = 3, LAppCase='$LAppCase', LAppCaseCreatedDate = GETUTCDATE(), ProcessedDate = GETUTCDATE(), UpdatedBy = 'DW-Automation', Comments = ISNULL(Comments + ' | ', '') + 'SOU Training assigned' WHERE ID = $ID;"
                     } catch {
@@ -1964,7 +1825,7 @@ foreach ($messageString in $dbmessagesAll) {
                  }
             }
 
-            Write-Log "MainLoop: SOU/TOU Training status for $userUPN: $SOUTrainingStatus" -Level 'INFO'
+            Write-Log "MainLoop: SOU/TOU Training status for $userUPN : $SOUTrainingStatus" -Level 'INFO'
 
             if ($SOUTrainingStatus -notin ("PendingLAppCreation", "ErrorCreatingLApp", "ErrorNoCSODFile", "Expired", "PTW_Failed", "PTW_Missing")) {
                  Write-Log "MainLoop: Attempting Copilot license assignment logic for $userUPN. SOU/TOU Status: $SOUTrainingStatus" -Level 'VERBOSE'
@@ -1986,15 +1847,6 @@ foreach ($messageString in $dbmessagesAll) {
                         $sqlExMsg = $_.Exception.Message
                         ScriptError -msg "SQL update failed for 'Copilot License Assigned' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
                     }
-                    # Dataverse log for assigned
-                    $completionTimeAssigned = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-                    $dvBodyAssigned = @{
-                        new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                        new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeAssigned
-                        new_lappcasenumber = $LAppCase; new_status = 'Completed'; new_errorcode = $null
-                    } | ConvertTo-Json
-                Write-Log "MainLoop: Attempting to log Copilot license assignment success to Dataverse for UPN $userUPN. Status: Completed" -Level 'VERBOSE'
-                    Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyAssigned
                     Update-TaskStatus -TicketNumber $TaskNumber -State '3' -WorkNotes 'Copilot license assigned. Task closed.'
                     Update-TicketStatus -TicketNumber $RITMNumber -State '3' -Stage 'Completed' -WorkNotes 'Copilot license assigned. RITM closed.'
                 } elseif ($CopilotAssignmentResult -eq 'Pending') {
@@ -2002,7 +1854,6 @@ foreach ($messageString in $dbmessagesAll) {
                     # DB status remains 'Pending Training' or similar. No change needed here to make it re-evaluate.
                 } elseif ($CopilotAssignmentResult -eq 'Failed' -or $SOUTrainingStatus -in ("Expired", "PTW_Failed", "PTW_Missing")) { # SOU/TOU Failed or other terminal states from Get-SOUStatus
                     Write-Log "Copilot license processing for $userUPN ended with status: $CopilotAssignmentResult / $SOUTrainingStatus. Record should be closed." -Level INFO
-                    # Invoke-UpgradeToCopilot or Get-SOUStatus should have handled DB/SNOW/Dataverse updates for failure.
                 } else { # Error states from Invoke-UpgradeToCopilot
                      ScriptError -msg "Error during Copilot license assignment for $userUPN. Result: $CopilotAssignmentResult. SOU Status: $SOUTrainingStatus" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
                 }
@@ -2020,7 +1871,7 @@ foreach ($messageString in $dbmessagesAll) {
                 ScriptError -msg "SQL update failed for 'Copilot License On-Hold (Quota)' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             }
             Update-TicketStatus -TicketNumber $RITMNumber -Stage 'Waiting List' -State '5' -WorkNotes 'Copilot licenses for entity/tenant at capacity. Request on waiting list.'
-            try { New-MgGroupMember -GroupId $CopilotPendingGroupID -DirectoryObjectId $MgUser.Id } catch { Write-Log "Failed to add $userUPN to Copilot pending group $CopilotPendingGroupID: $($_.Exception.Message)" -Level WARN }
+            try { New-MgGroupMember -GroupId $CopilotPendingGroupID -DirectoryObjectId $MgUser.Id } catch { Write-Log "Failed to add $userUPN to Copilot pending group $CopilotPendingGroupID : $($_.Exception.Message)" -Level WARN }
         }
 
     } elseif ($LicenseType -eq 'Microsoft365') {
@@ -2042,14 +1893,6 @@ foreach ($messageString in $dbmessagesAll) {
                 $sqlExMsg = $_.Exception.Message
                 ScriptError -msg "SQL update failed for 'E1/E5 Already Has Target License' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase
             }
-            # Dataverse log
-            $completionTimeE1E5Done = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-            $dvBodyE1E5Done = @{
-                new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeE1E5Done
-                new_status = 'Completed'; new_errorcode = "Already has target license ($action)"
-            } | ConvertTo-Json
-            Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyE1E5Done
             continue
         }
 
@@ -2077,15 +1920,6 @@ foreach ($messageString in $dbmessagesAll) {
                     $sqlExMsg = $_.Exception.Message
                     ScriptError -msg "SQL update failed for 'E1/E5 License Replicated' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase -saviyntRequestReferenceIDsForError $saviyntRequestReferenceIDs
                 }
-                # Dataverse Log
-                $completionTimeE1E5Rep = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-                $dvBodyE1E5Rep = @{
-                    new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                    new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $ProcessedDate; new_completiontime = $completionTimeE1E5Rep
-                    new_saviynttrackingid = $SaviyntTrackIDFromDB; new_saviynttransactionid = $SaviyntTransactionIDFromDB; new_status = 'Success'; new_errorcode = $null
-                } | ConvertTo-Json
-                Write-Log "MainLoop: Attempting to log M365 license replicated status to Dataverse for UPN $userUPN. Status: Success" -Level 'VERBOSE'
-                Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodyE1E5Rep
                 continue
             } else {
                 # Check if it's been too long (e.g., > 6 hours as per E1-E5 script)
@@ -2169,18 +2003,7 @@ foreach ($messageString in $dbmessagesAll) {
                     $sqlExMsg = $_.Exception.Message
                     ScriptError -msg "SQL update failed for 'Saviynt Action Processed' status for DB ID $ID. SQL Error: $sqlExMsg" -UserUPNForError $userUPN -LicenseTypeForError $LicenseType -RITMNumberForError $RITMNumber -actionForError $action -RequestedByForError $RequestedBy -licenseCategorizationIDForError $licenseCategorizationID -RequestedTimeForError $RequestedDate -ProcessedTimeForError $ProcessedDate -LAppCaseForError $LAppCase -saviyntRequestReferenceIDsForError $saviyntRequestReferenceIDs
                 }
-                # Dataverse log for initial Saviynt submission (even if ExitCode is an error, it's an outcome of this attempt)
-                $completionTimeSavSub = (Get-Date).ToString('MM/dd/yyyy HH:mm:ss')
-                $dvBodySavSub = @{
-                    new_requestedby = $RequestedBy; new_requestedfor = $userUPN; 'new_LicenseCategorizationID@odata.bind' = "/crd15_license_categories($licenseCategorizationID)"; new_action = $action
-                    new_requestsource = 'DWP-Automation'; new_requesttime = $RequestedTime; new_processedtime = $completionTimeSavSub # Processed now
-                    new_saviynttrackingid = $saviyntRequestReferenceIDs.trackingID; new_saviynttransactionid = $saviyntRequestReferenceIDs.APITransactionID
-                    new_status = if ($saviyntRequestReferenceIDs.ExitCode -eq "Success" -or $saviyntRequestReferenceIDs.ExitCode -eq "NotE5InSaviyntNoDowngradeNeeded") { "In Progress" } else { "Error" } # Reflects Saviynt submission status
-                    new_errorcode = if ($saviyntRequestReferenceIDs.ExitCode -ne "Success" -and $saviyntRequestReferenceIDs.ExitCode -ne "NotE5InSaviyntNoDowngradeNeeded") { $saviyntRequestReferenceIDs.ExitCode } else { $null }
-                    new_snowtasknumber = $saviyntRequestReferenceIDs.SnowTaskNumber
-                } | ConvertTo-Json
-                Write-Log "MainLoop: Attempting to log Saviynt submission status to Dataverse for UPN $userUPN. Status: $($dvBodySavSub.new_status)" -Level 'VERBOSE'
-                Invoke-RestMethod -Uri $lic_queue_apiUrl -Method Post -Headers $Dataverseheaders -Body $dvBodySavSub
+                continue
             }
         } # End if new Saviynt processing needed
 
